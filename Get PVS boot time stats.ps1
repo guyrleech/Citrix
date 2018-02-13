@@ -339,6 +339,7 @@ if( $events.Count -gt 0 )
             $legend = New-Object system.Windows.Forms.DataVisualization.Charting.Legend
             $legend.name = $computer
             $Chart.Legends.Add($legend)
+            $Chart.Series[$computer].ToolTip = $computer
 
             $events | Where-Object { $_.Server -eq $computer } | ForEach-Object `
             {
