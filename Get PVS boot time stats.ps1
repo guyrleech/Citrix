@@ -1,15 +1,21 @@
-﻿<#
+﻿#requires -version 3.0
+
+<#
     Get Citrix PVS target boot time events from event log and convert to CSV for reporting or alerting purposes
 
     Ensure that each PVS server's stream service has event logging enabled
 
     Guy Leech, 2017
+
+    Modification history:
+
+    13/02/18   GL   Added chart view option
 #>
 
 <#
 .SYNOPSIS
 
-Get Citrix PVS target boot time events from event log and convert to CSV for reporting or alerting purposes
+Get Citrix PVS target boot time events from event logs and output to CSV or a chart for reporting or alerting, by email, purposes
 
 .DESCRIPTION
 
@@ -45,6 +51,10 @@ If the slowest time (in seconds) exceeds this value then an email alert is sent.
 
 Output the results to a graphical grid view where they can be sorted/filtered
 
+.PARAMETER chartView
+
+Display the results in a chart
+
 .PARAMETER mailserver
 
 The SMTP email server to use for sending the email.
@@ -69,15 +79,29 @@ The email address of the sender. A default one is provided if none is specified.
 
 If specified, will communicate with the email server using SSL.
 
+.PARAMETER search
+
+Regex pattern to use when searching and replacing server names when they need sanitising for security purposes.
+
+.PARAMETER replace
+
+Regex pattern to replace in server names when they need sanitising for security purposes.
+
 .EXAMPLE
 
-& 'Get PVS boot time stats.ps1' -last 7d -output c:\boot.times.csv
+& '.\Get PVS boot time stats.ps1' -last 7d -output c:\boot.times.csv
 
 Will show PVS boot times in the last 7 days for the PVS server running the script and also output them to the file c:\boot.times.csv
 
 .EXAMPLE
 
-& 'Get PVS boot time stats.ps1' -last 7d -output c:\boot.times.csv -mailserver mailserver -recipients someone@somewhere.com -meanAbove 180 -computers pvsserver1,pvsserver2
+& '.\Get PVS boot time stats.ps1' -last 90d -chartview -computers pvsserver1,pvsserver2
+
+Will show PVS boot times in a chart in the last 90 days for the PVS servers pvsserver1 and pvsserver2
+
+.EXAMPLE
+
+& '.\Get PVS boot time stats.ps1' -last 7d -output c:\boot.times.csv -mailserver mailserver -recipients someone@somewhere.com -meanAbove 180 -computers pvsserver1,pvsserver2
 
 Will show PVS boot times in the last 7 days for the PVS servers pvsserver1 and pvsserver2 and if the average boot time is longer than 3 minutes it will send an email with the details to someone@somewhere.com.
 
@@ -95,6 +119,8 @@ Param
     [string]$last ,
     [string]$output ,
     [switch]$gridView ,
+    [switch]$chartView ,
+    [int]$chartType = -1 ,
     [int]$meanAbove = -1 ,
     [int]$medianAbove = -1 ,
     [int]$modeAbove = -1 ,
@@ -104,7 +130,12 @@ Param
     [string]$subject = "Citrix PVS boot times from $env:COMPUTERNAME" ,
     [string]$alertSubject = "Citrix PVS boot times alert from $env:COMPUTERNAME" ,
     [string]$from  = "$($env:COMPUTERNAME)@$($env:USERDNSDOMAIN)" ,
-    [switch]$useSSL
+    [switch]$useSSL ,
+    [string]$providerName = 'StreamProcess' ,
+    [int]$eventId = 10 ,
+    [string]$eventLog = 'Application' ,
+    [string]$search ,
+    [string]$replace
 )
 
 [array]$events = @()
@@ -143,7 +174,7 @@ if( ! [string]::IsNullOrEmpty( $last ) )
 $events = ForEach( $computer in $computers )
 {
     Write-Verbose "$count / $($computers.Count ) : processing $computer from $startDate"
-    @( Get-WinEvent -ComputerName $computer -FilterHashtable @{Logname='Application';ID=10;ProviderName='StreamProcess';StartTime=$startDate} | Where-Object { $_.Message -match 'boot time'}|select TimeCreated,Message | ForEach-Object `
+    @( Get-WinEvent -ComputerName $computer -FilterHashtable @{Logname=$eventLog;ID=$eventId;ProviderName=$providerName;StartTime=$startDate} | Where-Object { $_.Message -match 'boot time'}|select TimeCreated,Message | ForEach-Object `
     {
         ## Message will be "Device xxxxx boot time: 2 minutes 50 seconds."
         if( $_.Message -match '^Device (?<Target>[^\s]+) boot time: (?<minutes>\d+) minutes (?<seconds>\d+) seconds\.$' )
@@ -175,6 +206,17 @@ $events = ForEach( $computer in $computers )
 
 if( $events.Count -gt 0 )
 {
+    ## See if we need to transmogrify names to protect sensitive information
+    if( ! [string]::IsNullOrEmpty( $search ) )
+    {
+        $events | ForEach-Object `
+        {
+            $_.Server = $_.Server -replace $search , $replace
+        }
+        $computers = $computers -replace $search , $replace
+        $subject = $subject  -replace $search , $replace
+    }
+
     ## Now find median (middle) value
     [array]$sorted = $events | select BootTime | sort BootTime
 
@@ -273,6 +315,47 @@ if( $events.Count -gt 0 )
     if( $gridView )
     {
         $events | Out-GridView -Title $subject
+    }
+    if( $chartView )
+    {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Windows.Forms.DataVisualization
+
+        if( $chartType -lt 0 )
+        {
+            $chartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]::Range
+        }
+        $Chart = New-object System.Windows.Forms.DataVisualization.Charting.Chart
+        $chart.width = 900
+        $chart.Height = 600
+        [void]$chart.Titles.Add( ( $subject + " since $(Get-Date $startDate -Format 'G')" ) )
+        $ChartArea = New-Object System.Windows.Forms.DataVisualization.Charting.ChartArea
+        $Chart.ChartAreas.Add($ChartArea)
+        $ChartArea.AxisY.Title = "Boot time (seconds)"
+        ForEach( $computer in $computers )
+        {
+            [void]$Chart.Series.Add($computer)
+            $Chart.Series[$computer].ChartType = $chartType
+            $legend = New-Object system.Windows.Forms.DataVisualization.Charting.Legend
+            $legend.name = $computer
+            $Chart.Legends.Add($legend)
+
+            $events | Where-Object { $_.Server -eq $computer } | ForEach-Object `
+            {
+                $null = $Chart.Series[$computer].Points.AddXY( $_.TimeCreated , $_.BootTime )
+            }
+        }
+
+        $AnchorAll = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right -bor
+            [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+        $Form = New-Object Windows.Forms.Form
+        $Form.Width = $chart.Width
+        $Form.Height = $chart.Height + 50
+        $Form.controls.add($Chart)
+        $Chart.Anchor = $AnchorAll
+
+        $Form.Add_Shown({$Form.Activate()})
+        [void]$Form.ShowDialog()
     }
 }
 else
