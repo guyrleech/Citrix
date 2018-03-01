@@ -18,6 +18,14 @@
     26/01/18    GL  Added ability to match AD group regex and output group memberships
 
     01/02/18    GL  Added disk version descriptions and dns lookup option
+
+    22/02/18    GL  Added capability to include machines retrieved from DDCs which are not present in PVS
+                    Changed main device collection to .NET array so we can add potential orphans to it
+                    Added MaxRecordCount parameter for DDC calls
+
+    25/02/18    GL  Added GUI options to remove from PVS and DDC
+
+    27/02/18    GL  Added saving DDC and PVS servers to registry
 #>
 
 <#
@@ -38,6 +46,18 @@ Comma separated list of PVS servers to contact. Do not specify multiple servers 
 
 Comma separated list of Delivery Controllers to contact. Do not specify multiple servers if they use the same SQL database
 
+.PARAMETER registry
+
+Pick up the PVS and DDC servers from the registry rather than the command line. Must previously have saved them with -save and an optional server set name via -serverSet
+
+.PARAMETER serverSet
+
+Pick up the PVS and DDC servers from the registry sub key specified in this paramter rather than the command line. Must previously have saved them with -save and this server set name
+
+.PARAMETER save
+
+Save the PVS and DDC servers to the registry for later use with -registry. Use -serverSet to specify named sets of servers, e.g. preproduction and production
+
 .PARAMETER csv
 
 Path to a csv file that will have the results written to it. If none specified then output will be on screen to a grid view
@@ -45,6 +65,14 @@ Path to a csv file that will have the results written to it. If none specified t
 .PARAMETER noBootTime
 
 Will not try and contact active devices to find their last boot time. If WinRM not setup correctly or other issues mean remote calls will fail then this option can speed the script up
+
+.PARAMETER noOrphans
+
+Do not display machines which are present on DDCs/Studio but not in PVS. May be physical, MCS or VMs with local disks or could be orphans that did exist in PVS but do not any longer.
+
+.PARAMETER maxRecordCount
+
+Citrix DDC cmdlets by default only return 250 items so if there are more machines than this on a DDC then this parameter may need to be increased
 
 .PARAMETER name
 
@@ -57,6 +85,10 @@ Adds a column containing Citrix tags, if present, for each device
 .PARAMETER ADGroups
 
 A regular expression of AD groups to match and will output ones that match for which the device is a member
+
+.PARAMETER provisioningType
+
+The type of catalogue provisioning to check for in machines that are suspected of being orphaned from PVS as they were found on a DDC but not PVS
 
 .PARAMETER dns
 
@@ -90,7 +122,7 @@ Retrieve devices matching regular expression CTXUAT from the listed PVS server, 
 
 .NOTES
 
-Uses local PowerShell cmdlets for PVS and DDCs so run from a machine where both PVS and Studio consoles are installed.
+Uses local PowerShell cmdlets for PVS and DDCs, as well as Active Directory, so run from a machine where both PVS and Studio consoles are installed.
 
 #>
 
@@ -98,25 +130,35 @@ Uses local PowerShell cmdlets for PVS and DDCs so run from a machine where both 
 
 Param
 (
-    [Parameter(mandatory=$true)]
+    [Parameter(ParameterSetName='Manual',mandatory=$true,HelpMessage='Comma separated list of PVS servers')]
     [string[]]$pvsServers ,
-    [Parameter(mandatory=$true)]
+    [Parameter(ParameterSetName='Manual',mandatory=$true,HelpMessage='Comma separated list of Delivery controllers')]
     [string[]]$ddcs ,
+    [Parameter(ParameterSetName='Manual',mandatory=$false)]
+    [switch]$save ,
+    [Parameter(ParameterSetName='Registry',mandatory=$true,HelpMessage='Use default server set name from registry')]
+    [switch]$registry ,
+    [string]$serverSet = 'Default' ,
     [string]$csv ,
     [switch]$noBootTime ,
     [switch]$dns ,
     [string]$name ,
     [switch]$tags ,
+    [ValidateSet('PVS','MCS','Manual')]
+    [string]$provisioningType = 'PVS' ,
     [switch]$noMenu ,
+    [switch]$noOrphans ,
+    [string]$configRegKey = 'HKCU:\software\Guy Leech\PVS Fetcher' ,
     [string]$messageText ,
     [string]$messageCaption ,
+    [int]$maxRecordCount = 2000 ,
     [int]$timeout = 60 ,
     [string]$ADgroups ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
     [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" ) 
 )
 
-$columns = [System.Collections.ArrayList]( @( 'Name','description','PVS Server','DDC','sitename','collectionname','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled','Store Name','Disk Version Access','Disk Version Created','AD Account Exists','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
+$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled','Store Name','Disk Version Access','Disk Version Created','AD Account Exists','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
 {
@@ -219,9 +261,9 @@ $pvsDeviceActionerXAML = @"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:PVSDeviceViewerActions"
         mc:Ignorable="d"
-        Title="PVS Device Actioner" Height="396.565" Width="401.595">
-    <Grid Margin="0,0,-20,-29.667">
-        <ListView x:Name="lstMachines" HorizontalAlignment="Left" Height="289" Margin="23,22,0,0" VerticalAlignment="Top" Width="140">
+        Title="PVS Device Actioner" Height="502.565" Width="401.595">
+    <Grid Margin="0,0,-20.333,-103.667">
+        <ListView x:Name="lstMachines" HorizontalAlignment="Left" Height="380" Margin="23,22,0,0" VerticalAlignment="Top" Width="140">
             <ListView.View>
                 <GridView>
                     <GridViewColumn Header="Device" DisplayMemberBinding ="{Binding 'Name'}" />
@@ -229,7 +271,7 @@ $pvsDeviceActionerXAML = @"
             </ListView.View>
             <ListBoxItem Content="Device"/>
         </ListView>
-        <StackPanel x:Name="stkButtons" Margin="198,32,33.667,50" Orientation="Vertical">
+        <StackPanel x:Name="stkButtons" Margin="198,32,36,18" Orientation="Vertical">
             <Button x:Name="btnShutdown" Content="_Shutdown" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
             <Button x:Name="btnPowerOff" Content="_Power Off" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
             <Button x:Name="btnRestart" Content="_Restart" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
@@ -237,11 +279,41 @@ $pvsDeviceActionerXAML = @"
             <Button x:Name="btnMessageUsers" Content="_Message Users" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
             <Button x:Name="btnMaintModeOn" Content="Maintenance Mode O_n" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
             <Button x:Name="btnMaintModeOff" Content="Maintenance Mode O_ff" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
+            <Button x:Name="btnRemoveFromDDC" Content="Remove from _DDC" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
+            <Button x:Name="btnRemoveFromPVS" Content="Remove from P_VS" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
         </StackPanel>
     </Grid>
 </Window>
 
 "@
+
+Function Save-ConfigToRegistry( [string]$serverSet = 'Default' , [string[]]$DDCs , [string[]]$PVSServers )
+{
+    [string]$key = Join-Path $configRegKey $serverSet
+    if( ! ( Test-Path $key -ErrorAction SilentlyContinue ) )
+    {
+        $null = New-Item -Path $key -Force
+    }
+    Set-ItemProperty -Path $key -Name 'DDC' -Value $DDCs
+    Set-ItemProperty -Path $key -Name 'PVS' -Value $PVSServers
+}   
+
+Function Get-ConfigFromRegistry
+{
+    Param
+    (
+        [string]$serverSet = 'Default' , 
+        [ref]$DDCs , 
+        [ref]$PVSServers
+    )
+    [string]$key = Join-Path $configRegKey $serverSet
+    if( ! ( Test-Path $key -ErrorAction SilentlyContinue ) )
+    {
+        Write-Warning "Config registry key `"$key`" does not exist"
+    }
+    $DDCs.value = Get-ItemProperty -Path $key -Name 'DDC' -ErrorAction SilentlyContinue | select -ExpandProperty 'DDC' 
+    $PVSServers.value = Get-ItemProperty -Path $key -Name 'PVS' -ErrorAction SilentlyContinue | select -ExpandProperty 'PVS'
+}
 
 Function Load-GUI( $inputXaml )
 {
@@ -274,7 +346,7 @@ Function Perform-Action
 {
     Param
     (
-        [ValidateSet('Boot','Reboot','Shutdown','Message','MaintModeOn','MaintModeOff','PowerOff')]
+        [ValidateSet('Boot','Reboot','Shutdown','Message','Maintenance Mode On','Maintenance Mode Off','Power Off','Remove From DDC','Remove From PVS')]
         [string]$action ,
         $form
     )
@@ -321,11 +393,13 @@ Function Perform-Action
 
         switch -regex ( $action )
         {
-            'MaintModeOn'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true -MachineName ( $env:USERDOMAIN + '\' +  $device.Name ) ; break }
-            'MaintModeOff' { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $false -MachineName ( $env:USERDOMAIN + '\' +  $device.Name ) ; break }
+            'Remove From DDC' { Remove-BrokerMachine -Force -AdminAddress $device.ddc -MachineName $( if( [string]::IsNullOrEmpty( $device.DomainName ) ) { $device.Name } else {  $device.DomainName + '\' +  $device.Name } ) ; break  }
+            'Remove From PVS' { Set-PvsConnection -Server $device.'PVS Server'; Remove-PvsDevice -DeviceName $device.Name ; break }
+            'Maintenance Mode On'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
+            'Maintenance Mode Off' { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $false -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
             'Reboot' { Restart-Computer -ComputerName $device.Name ; break }
             'Shutdown' { Stop-Computer -ComputerName $device.Name ; break }
-            'Boot|PowerOff' ` ##  Can't use New-BrokerHostingPowerAction as may not be known to DDC
+            'Boot|Power Off' ` ##  Can't use New-BrokerHostingPowerAction as may not be known to DDC
             { 
                 Set-PvsConnection -Server $device.'PVS Server'
                 if( $_ -eq 'Boot' )
@@ -382,15 +456,29 @@ Function Perform-Action
     }
 }
 
+if( $registry )
+{
+    Get-ConfigFromRegistry -serverSet $serverSet -DDCs ( [ref] $ddcs ) -PVSServers ( [ref] $pvsServers )
+    if( ! $ddcs -or ! $ddcs.Count -or ! $pvsServers -or ! $pvsServers.Count )
+    {
+        Write-Warning "Failed to get PVS and/or DDC servers from registry key `"$configRegKey`" for server set `"$serverSet`""
+        return
+    }
+}
+elseif( $save )
+{
+    Save-ConfigToRegistry -serverSet $serverSet  -DDCs $ddcs -PVSServers $pvsServers
+}
+
 ## Get all information from DDCs so we can lookup locally
 [hashtable]$machines = @{}
 
 ForEach( $ddc in $ddcs )
 {
-    $machines.Add( $ddc , ( Get-BrokerMachine -AdminAddress $ddc -ErrorAction SilentlyContinue ) )
+    $machines.Add( $ddc , [System.Collections.ArrayList] ( Get-BrokerMachine -AdminAddress $ddc -MaxRecordCount $maxRecordCount -ErrorAction SilentlyContinue ) )
 }
 
-[array]$devices = @()
+$devices = New-Object -TypeName System.Collections.ArrayList
 
 ForEach( $pvsServer in $pvsServers )
 {
@@ -406,7 +494,7 @@ ForEach( $pvsServer in $pvsServers )
     [hashtable]$diskVersions = @{}
 
     # Get all sites that we can see on this server and find all devices and cross ref to Citrix for catalogues and delivery groups
-    $devices += Get-PvsDevice | Where-Object { $_.Name -match $name } | ForEach-Object `
+    Get-PvsDevice | Where-Object { $_.Name -match $name } | ForEach-Object `
     {
         $device = $_
         [int]$bootVersion = -1
@@ -546,15 +634,114 @@ ForEach( $pvsServer in $pvsServers )
                 }
             }
         }
-        $device
-    } | Select $columns | Sort Name
+        $null = $devices.Add( $device )
+    } 
+}
+
+## See if we have any devices from DDC machine list which are marked as being in PVS catalogues but not in our devices list so are orphans
+if( ! $noOrphans )
+{
+    $machines.GetEnumerator() | ForEach-Object `
+    {
+        $ddc = $_.Key
+        ## Cache machine catalogues so we can check provisioning type
+        [hashtable]$catalogues = @{}
+        Get-BrokerCatalog -AdminAddress $ddc | ForEach-Object { $catalogues.Add( $_.Name , $_ ) }
+
+        ## Add to devices so we can display as much detail as possible if PVS provisioned
+        ForEach( $machine in $_.Value )
+        {
+            $domainName,$machineName = $machine.MachineName -split '\\'
+            if( [string]::IsNullOrEmpty( $machineName ) )
+            {
+                $machineName = $domainName
+                $domainName = $null
+            }
+            if( ! [string]::IsNullOrEmpty( $name ) -and $machineName -notmatch $name )
+            {
+                continue
+            }
+            ## Now see if have this in devices in which case we ignore it - domain name in device record may be FQDN but domain from catalogue will not be (may also be missing in device)
+            $device = $devices | Where-Object { $_.Name -eq $machineName -and ( ! $domainName -or ! $_.DomainName -or ( $domainName -eq ( $_.DomainName -split '\.' )[0] ) ) }
+            if( ! $device )
+            {
+                ## Now check machine catalogues so if ProvisioningType = PVS then we will look to see if it an orphan
+                $catalogue = $catalogues[ $machine.CatalogName  ]
+                if( ! $catalogue -or $catalogue.ProvisioningType -match $provisioningType )
+                {
+                    $newItem = New-Object -TypeName PSCustomObject -Property `
+                        (@{ 'Name' = ( $machine.MachineName -split '\\' )[-1] 
+                        'DomainName' = if( $machine.MachineName.IndexOf( '\' ) -gt 0 )
+                        {
+                            ($machine.MachineName -split '\\')[0]
+                        }
+                        else
+                        {
+                            $null
+                        }
+                        'DDC' = $ddc ;
+                        'Machine Catalogue' = $machine.CatalogName
+                        'Delivery Group' = $machine.DesktopGroupName
+                        'Registration State' = $machine.RegistrationState
+                        'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
+                        'User Sessions' = $machine.SessionCount ; } ) 
+
+                    if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue )
+                    {
+                        [hashtable]$adparams = @{}
+                        if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+                        {
+                            $adparams.Add( 'Properties' , 'MemberOf' )
+                        }
+                        $adAccount = $null
+                        try
+                        {
+                            $adaccount = Get-ADComputer $newItem.Name -ErrorAction SilentlyContinue @adparams
+                        }
+                        catch
+                        {
+                        }
+                        $newItem | Add-Member -MemberType NoteProperty -Name 'AD Account Exists' -value ( $adAccount -ne $null )
+
+                        if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+                        {
+                            $newItem | Add-Member -MemberType NoteProperty -Name 'AD Groups' -value ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
+                        }
+                    }
+                    if( ! $noBootTime )
+                    {
+                        $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $newItem.Name | Select -ExpandProperty LastBootUpTime
+                        if( $bootTime )
+                        {
+                            $newItem | Add-Member -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
+                        }
+                        else
+                        {
+                            Write-Warning "Failed to get boot time for orphan $($newItem.Name)"
+                        }
+                    }
+                    if( $tags )
+                    {
+                        $newItem | Add-Member -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
+                    }
+                    if( $dns )
+                    {
+                        [array]$ipv4Address = @( Resolve-DnsName -Name $newItem.Name -Type A )
+                        $newItem | Add-Member -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
+                    }
+
+                    $null = $devices.Add( $newItem )
+                }
+            }
+        }
+    }
 }
 
 if( $devices -and $devices.Count )
 {
     if( ! [string]::IsNullOrEmpty( $csv ) )
     {
-        $devices | Export-Csv -Path $csv -NoTypeInformation -NoClobber
+        $devices | Select $columns | Sort Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
     }
     else
     {
@@ -572,7 +759,7 @@ if( $devices -and $devices.Count )
         {
             $title += " matching `"$name`""
         }
-        [array]$selected = @( $devices | Out-GridView -Title $title @Params )
+        [array]$selected = @( $devices| Select $columns | Sort Name | Out-GridView -Title $title @Params )
         if( $selected -and $selected.Count )
         {
             $mainForm = Load-GUI $pvsDeviceActionerXAML
@@ -582,12 +769,14 @@ if( $devices -and $devices.Count )
                 return
             }
 
-            $WPFbtnMaintModeOff.Add_Click({ Perform-Action -action MaintModeOff -form $mainForm })
-            $WPFbtnMaintModeOn.Add_Click({ Perform-Action -action MaintModeOn  -form $mainForm })
+            $WPFbtnRemoveFromDDC.Add_Click({ Perform-Action -action 'Remove From DDC' -form $mainForm })
+            $WPFbtnRemoveFromPVS.Add_Click({ Perform-Action -action 'Remove From PVS' -form $mainForm })
+            $WPFbtnMaintModeOff.Add_Click({ Perform-Action -action 'Maintenance Mode Off' -form $mainForm })
+            $WPFbtnMaintModeOn.Add_Click({ Perform-Action -action 'Maintenance Mode Off'  -form $mainForm })
             $WPFbtnShutdown.Add_Click({ Perform-Action -action Shutdown -form $mainForm })
             $WPFbtnRestart.Add_Click({ Perform-Action -action Reboot -form $mainForm  })
             $WPFbtnBoot.Add_Click({ Perform-Action -action Boot -form $mainForm })
-            $WPFbtnPowerOff.Add_Click({ Perform-Action -action PowerOff -form $mainForm  })
+            $WPFbtnPowerOff.Add_Click({ Perform-Action -action 'Power Off' -form $mainForm  })
             $WPFbtnMessageUsers.Add_Click({ Perform-Action -action Message -form $mainForm })
             $WPFlstMachines.Items.Clear()
             $WPFlstMachines.ItemsSource = $selected
