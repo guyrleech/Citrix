@@ -26,6 +26,8 @@
     25/02/18    GL  Added GUI options to remove from PVS and DDC
 
     27/02/18    GL  Added saving DDC and PVS servers to registry
+
+    14/03/18    GL  Changed AD Account Exists to Created date
 #>
 
 <#
@@ -158,7 +160,7 @@ Param
     [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" ) 
 )
 
-$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled','Store Name','Disk Version Access','Disk Version Created','AD Account Exists','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
+$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled','Store Name','Disk Version Access','Disk Version Created','AD Account Created','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
 {
@@ -505,22 +507,23 @@ ForEach( $pvsServer in $pvsServers )
             $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $device.Name | Select -ExpandProperty LastBootUpTime
             if( $bootTime )
             {
-                $device | Add-Member -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
+                Add-Member -InputObject $device  -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
             }
             else
             {
                 Write-Warning "Failed to get boot time for $($device.Name)"
             }
         }
-        $device | Add-Member -MemberType NoteProperty -Name 'PVS Server' -Value $pvsServer
+        Add-Member -InputObject $device  -MemberType NoteProperty -Name 'PVS Server' -Value $pvsServer
         if( $vdisk )
         {
-            $device | Add-Member -MemberType NoteProperty -Name 'Disk Name' -value $vdisk.Name
-            $device | Add-Member -MemberType NoteProperty -Name 'Store Name' -value $vdisk.StoreName
-            $device | Add-Member -MemberType NoteProperty -Name 'Disk Description' -value $vdisk.Description
-            $device | Add-Member -MemberType NoteProperty -Name 'Cache Type' -value $cacheTypes[$vdisk.WriteCacheType]
-            $device | Add-Member -MemberType NoteProperty -Name 'Disk Size (GB)' -value ([math]::Round( $vdisk.DiskSize / 1GB , 2 ))
-            $device | Add-Member -MemberType NoteProperty -Name 'Write Cache Size (MB)' -value $vdisk.WriteCacheSize
+            Add-Member -InputObject $device -NotePropertyMembers @{
+                'Disk Name' = $vdisk.Name
+                'Store Name' = $vdisk.StoreName
+                'Disk Description' = $vdisk.Description
+                'Cache Type' = $cacheTypes[$vdisk.WriteCacheType]
+                'Disk Size (GB)' = ([math]::Round( $vdisk.DiskSize / 1GB , 2 ))
+                'Write Cache Size (MB)' = $vdisk.WriteCacheSize }
             ## Cache vdisk version info to reduce PVS server hits
             $versions = $diskVersions[ $vdisk.DiskLocatorId ]
             if( ! $versions )
@@ -548,33 +551,35 @@ ForEach( $pvsServer in $pvsServers )
                     ## Access: Read-only access of the Disk Version. Values are: 0 (Production), 1 (Maintenance), 2 (MaintenanceHighestVersion), 3 (Override), 4 (Merge), 5 (MergeMaintenance), 6 (MergeTest), and 7 (Test) Min=0, Max=7, Default=0
                     $bootVersion = $lastestProductionVersion
                 }
-                $device | Add-Member -MemberType NoteProperty -Name 'Override Version' -value $( if( $override ) { $bootVersion } else { $null } )    
-                $device | Add-Member -MemberType NoteProperty -Name 'Vdisk Latest Version' -value $lastestProductionVersion     
-                $device | Add-Member -MemberType NoteProperty -Name 'Latest Version Description' -value ( $versions | Where-Object { $_.Version -eq $lastestProductionVersion } | Select -ExpandProperty Description )         
+                Add-Member -InputObject $device -NotePropertyMembers @{
+                    'Override Version' = $( if( $override ) { $bootVersion } else { $null } ) 
+                    'Vdisk Latest Version' = $lastestProductionVersion 
+                    'Latest Version Description' = $( $versions | Where-Object { $_.Version -eq $lastestProductionVersion } | Select -ExpandProperty Description )  
+                }      
             }
-            $device | Add-Member -MemberType NoteProperty -Name 'Vdisk Production Version' -value $bootVersion
+            Add-Member -InputObject $device -MemberType NoteProperty -Name 'Vdisk Production Version' -value $bootVersion
         }
         $deviceInfo = Get-PvsDeviceInfo -DeviceId $device.DeviceId
         if( $deviceInfo )
         {
-            $device | Add-Member -MemberType NoteProperty -Name 'Disk Version Access' -value $accessTypes[ $deviceInfo.DiskVersionAccess ]
+            Add-Member -InputObject $device -MemberType NoteProperty -Name 'Disk Version Access' -value $accessTypes[ $deviceInfo.DiskVersionAccess ]
             if( $device.Active )
             {
                 ## Check if booting off the disk we should be as previous info is what is assigned, not what is necessarily being used (e.g. vdisk changed for device whilst it is booted)
                 $bootedDiskName = (( Get-PvsDiskVersion -DiskLocatorId $deviceInfo.DiskLocatorId | Select -First 1 | Select -ExpandProperty Name ) -split '\.')[0]
-                $device | Add-Member -MemberType NoteProperty -Name 'Booted Disk Version' -value $deviceInfo.DiskVersion
+                Add-Member -InputObject $device  -MemberType NoteProperty -Name 'Booted Disk Version' -value $deviceInfo.DiskVersion
                 if( $bootVersion -ge 0 )
                 {
                     Write-Verbose "$($device.Name) booted off $bootedDiskName, disk configured $($vDisk.Name)"
-                    $device | Add-Member -MemberType NoteProperty -Name 'Booted off latest' -value ( $bootVersion -eq $deviceInfo.DiskVersion -and $bootedDiskName -eq $vdisk.Name )
-                    $device | Add-Member -MemberType NoteProperty -Name 'Booted off vdisk' -value $bootedDiskName
+                    Add-Member -InputObject $device  -MemberType NoteProperty -Name 'Booted off latest' -value ( $bootVersion -eq $deviceInfo.DiskVersion -and $bootedDiskName -eq $vdisk.Name )
+                    Add-Member -InputObject $device  -MemberType NoteProperty -Name 'Booted off vdisk' -value $bootedDiskName
                 }
             }
             if( $versions )
             {
                 try
                 {
-                    $device | Add-Member -MemberType NoteProperty -Name 'Disk Version Created' -value ( $versions | Where-Object { $_.Version -eq $deviceInfo.DiskVersion } | select -ExpandProperty CreateDate )
+                    Add-Member -InputObject $device -MemberType NoteProperty -Name 'Disk Version Created' -value ( $versions | Where-Object { $_.Version -eq $deviceInfo.DiskVersion } | select -ExpandProperty CreateDate )
                 }
                 catch
                 {
@@ -585,30 +590,31 @@ ForEach( $pvsServer in $pvsServers )
         if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue )
         {
             [hashtable]$adparams = @{}
+            $adparams.Add( 'Properties' , @( 'Created' ) )
             if( ! [string]::IsNullOrEmpty( $ADgroups ) )
             {
-                $adparams.Add( 'Properties' , 'MemberOf' )
+                $adparams[ 'Properties' ] +=  'MemberOf' 
             }
             $adAccount = $null
             try
             {
                 $adaccount = Get-ADComputer $device.Name -ErrorAction SilentlyContinue @adparams
-            }
+                Add-Member -InputObject $device  -MemberType NoteProperty -Name 'AD Account Created' -value $adAccount.Created -ErrorAction SilentlyContinue
+            } 
             catch
             {
             }
-            $device | Add-Member -MemberType NoteProperty -Name 'AD Account Exists' -value ( $adAccount -ne $null )
 
-            if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+            if( $adaccount -and ! [string]::IsNullOrEmpty( $ADgroups ) )
             {
-                $device | Add-Member -MemberType NoteProperty -Name 'AD Groups' -value ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
+                Add-Member -InputObject $device  -MemberType NoteProperty -Name 'AD Groups' -value ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
             }
         }
 
         if( $device.Active -and $dns )
         {
             [array]$ipv4Address = @( Resolve-DnsName -Name $device.Name -Type A )
-            $device | Add-Member -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
+            Add-Member -InputObject $device  -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
         }
             
         if( ( Get-Command -Name Get-BrokerMachine -ErrorAction SilentlyContinue ) )
@@ -620,15 +626,17 @@ ForEach( $pvsServer in $pvsServers )
                 $machine = $machines[ $ddc ] | Where-Object { $_.MachineName -eq  ( ($device.DomainName -split '\.')[0] + '\' + $device.Name ) } ##Get-BrokerMachine -MachineName ( ($device.DomainName -split '\.')[0] + '\' + $device.Name ) -AdminAddress $ddc -ErrorAction SilentlyContinue
                 if( $machine )
                 {
-                    $device | Add-Member -MemberType NoteProperty -Name 'Machine Catalogue' -value $machine.CatalogName
-                    $device | Add-Member -MemberType NoteProperty -Name 'Delivery Group' -value $machine.DesktopGroupName
-                    $device | Add-Member -MemberType NoteProperty -Name 'Registration State' -value $machine.RegistrationState
-                    $device | Add-Member -MemberType NoteProperty -Name 'User Sessions' -value $machine.SessionCount
-                    $device | Add-Member -MemberType NoteProperty -Name 'Maintenance Mode' -value $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
-                    $device | Add-Member -MemberType NoteProperty -Name 'DDC' -Value $ddc
+                    Add-Member -InputObject $device -NotePropertyMembers @{
+                        'Machine Catalogue' = $machine.CatalogName
+                        'Delivery Group' = $machine.DesktopGroupName
+                        'Registration State' = $machine.RegistrationState
+                        'User Sessions' = $machine.SessionCount
+                        'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
+                        'DDC' = $ddc
+                    }
                     if( $tags )
                     {
-                        $device | Add-Member -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
+                        Add-Member -InputObject $device  -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
                     }
                     break
                 }
@@ -649,88 +657,89 @@ if( ! $noOrphans )
         Get-BrokerCatalog -AdminAddress $ddc | ForEach-Object { $catalogues.Add( $_.Name , $_ ) }
 
         ## Add to devices so we can display as much detail as possible if PVS provisioned
-        ForEach( $machine in $_.Value )
+        $_.Value | ForEach-Object `
         {
+            $machine = $_
             $domainName,$machineName = $machine.MachineName -split '\\'
             if( [string]::IsNullOrEmpty( $machineName ) )
             {
                 $machineName = $domainName
                 $domainName = $null
             }
-            if( ! [string]::IsNullOrEmpty( $name ) -and $machineName -notmatch $name )
+            if( [string]::IsNullOrEmpty( $name ) -or $machineName -match $name )
             {
-                continue
-            }
-            ## Now see if have this in devices in which case we ignore it - domain name in device record may be FQDN but domain from catalogue will not be (may also be missing in device)
-            $device = $devices | Where-Object { $_.Name -eq $machineName -and ( ! $domainName -or ! $_.DomainName -or ( $domainName -eq ( $_.DomainName -split '\.' )[0] ) ) }
-            if( ! $device )
-            {
-                ## Now check machine catalogues so if ProvisioningType = PVS then we will look to see if it an orphan
-                $catalogue = $catalogues[ $machine.CatalogName  ]
-                if( ! $catalogue -or $catalogue.ProvisioningType -match $provisioningType )
+                ## Now see if have this in devices in which case we ignore it - domain name in device record may be FQDN but domain from catalogue will not be (may also be missing in device)
+                $device = $devices | Where-Object { $_.Name -eq $machineName -and ( ! $domainName -or ! $_.DomainName -or ( $domainName -eq ( $_.DomainName -split '\.' )[0] ) ) }
+                if( ! $device )
                 {
-                    $newItem = New-Object -TypeName PSCustomObject -Property `
-                        (@{ 'Name' = ( $machine.MachineName -split '\\' )[-1] 
-                        'DomainName' = if( $machine.MachineName.IndexOf( '\' ) -gt 0 )
-                        {
-                            ($machine.MachineName -split '\\')[0]
-                        }
-                        else
-                        {
-                            $null
-                        }
-                        'DDC' = $ddc ;
-                        'Machine Catalogue' = $machine.CatalogName
-                        'Delivery Group' = $machine.DesktopGroupName
-                        'Registration State' = $machine.RegistrationState
-                        'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
-                        'User Sessions' = $machine.SessionCount ; } ) 
+                    ## Now check machine catalogues so if ProvisioningType = PVS then we will look to see if it an orphan
+                    $catalogue = $catalogues[ $machine.CatalogName  ]
+                    if( ! $catalogue -or $catalogue.ProvisioningType -match $provisioningType )
+                    {
+                        $newItem = [pscustomobject]@{ 
+                            'Name' = ( $machine.MachineName -split '\\' )[-1] 
+                            'DomainName' = if( $machine.MachineName.IndexOf( '\' ) -gt 0 )
+                            {
+                                ($machine.MachineName -split '\\')[0]
+                            }
+                            else
+                            {
+                                $null
+                            }
+                            'DDC' = $ddc ;
+                            'Machine Catalogue' = $machine.CatalogName
+                            'Delivery Group' = $machine.DesktopGroupName
+                            'Registration State' = $machine.RegistrationState
+                            'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
+                            'User Sessions' = $machine.SessionCount ; }
 
-                    if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue )
-                    {
-                        [hashtable]$adparams = @{}
-                        if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+                        if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue )
                         {
-                            $adparams.Add( 'Properties' , 'MemberOf' )
-                        }
-                        $adAccount = $null
-                        try
-                        {
-                            $adaccount = Get-ADComputer $newItem.Name -ErrorAction SilentlyContinue @adparams
-                        }
-                        catch
-                        {
-                        }
-                        $newItem | Add-Member -MemberType NoteProperty -Name 'AD Account Exists' -value ( $adAccount -ne $null )
+                            [hashtable]$adparams = @{}
+                            $adparams.Add( 'Properties' , @( 'Created' ) )
+                            if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+                            {
+                                $adparams[ 'Properties' ] +=  'MemberOf' 
+                            }
+                            $adAccount = $null
+                            try
+                            {
+                                $adaccount = Get-ADComputer $newItem.Name -ErrorAction SilentlyContinue @adparams
+                                Add-Member -InputObject $newItem -MemberType NoteProperty -Name 'AD Account Created' -value $adAccount.Created
+                            }
+                            catch
+                            {
+                            }
 
-                        if( ! [string]::IsNullOrEmpty( $ADgroups ) )
-                        {
-                            $newItem | Add-Member -MemberType NoteProperty -Name 'AD Groups' -value ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
+                            if( ! [string]::IsNullOrEmpty( $ADgroups ) )
+                            {
+                               Add-Member -InputObject $newItem -MemberType NoteProperty -Name 'AD Groups' -value ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
+                            }
                         }
-                    }
-                    if( ! $noBootTime )
-                    {
-                        $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $newItem.Name | Select -ExpandProperty LastBootUpTime
-                        if( $bootTime )
+                        if( ! $noBootTime )
                         {
-                            $newItem | Add-Member -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
+                            $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $newItem.Name | Select -ExpandProperty LastBootUpTime
+                            if( $bootTime )
+                            {
+                                Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
+                            }
+                            else
+                            {
+                                Write-Warning "Failed to get boot time for orphan $($newItem.Name)"
+                            }
                         }
-                        else
+                        if( $tags )
                         {
-                            Write-Warning "Failed to get boot time for orphan $($newItem.Name)"
+                            Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
                         }
-                    }
-                    if( $tags )
-                    {
-                        $newItem | Add-Member -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
-                    }
-                    if( $dns )
-                    {
-                        [array]$ipv4Address = @( Resolve-DnsName -Name $newItem.Name -Type A )
-                        $newItem | Add-Member -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
-                    }
+                        if( $dns )
+                        {
+                            [array]$ipv4Address = @( Resolve-DnsName -Name $newItem.Name -Type A )
+                            Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
+                        }
 
-                    $null = $devices.Add( $newItem )
+                        $null = $devices.Add( $newItem )
+                    }
                 }
             }
         }
