@@ -181,7 +181,6 @@ Param
     [switch]$registry ,
     [string]$serverSet = 'Default' ,
     [string[]]$hypervisors ,
-    [string]$vmPattern ,
     [string]$csv ,
     [switch]$noBootTime ,
     [switch]$dns ,
@@ -206,12 +205,6 @@ Param
 $columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
     'Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
-
-if( ! [string]::IsNullOrEmpty( $vmPattern ) -and ! [string]::IsNullOrEmpty( $name ) -and $vmPattern -ne $name )
-{
-    Write-Error "Cannot use -vmPattern and -name when they are not equal since could return incorrect/duplicate results. Specifying just -name will suffice."
-    return
-}
 
 if( $dns )
 {
@@ -723,14 +716,9 @@ ForEach( $ddc in $ddcs )
 
 if( $hypervisors -and $hypervisors.Count )
 {
-    if( ! [string]::IsNullOrEmpty( $name ) )
+    if( [string]::IsNullOrEmpty( $name ) )
     {
-        ## Restrict VMs to the same set as PVS devices are
-        $vmPattern = $name
-    }        
-    if( [string]::IsNullOrEmpty( $vmPattern ) )
-    {
-        Write-Error "Must specify a VM name pattern via -vmPattern when cross referencing to VMware"
+        Write-Error "Must specify a VM name pattern via -name when cross referencing to VMware"
         return
     }
 
@@ -746,17 +734,12 @@ if( $hypervisors -and $hypervisors.Count )
         $null = $columns.Add( 'Hypervisor')
 
         ## Cache all VMs for efficiency
-        Get-VM | Where-Object { $_.Name -match $vmPattern } | ForEach-Object `
+        Get-VM | Where-Object { $_.Name -match $name } | ForEach-Object `
         {
             $vms.Add( $_.Name , $_ )
         }
-        Write-Verbose "Got $($vms.Count) vms from $($hypervisors -split ' ')"
+        Write-Verbose "Got $($vms.Count) vms matching `"$name`" from $($hypervisors -split ' ')"
     }
-}
-elseif( $vmPattern )
-{
-    Write-Error "-vmPattern specified but there are no hypervisors specified via -hypervisors or saved to the registry"
-    return
 }
 
 if( $PSVersionTable.PSVersion.Major -lt 5 -and $columns.Count -gt 30 -and [string]::IsNullOrEmpty( $csv ) )
@@ -1131,7 +1114,7 @@ if( ! $noOrphans )
             }
             if( ! $vmCount )
             {
-                Write-Warning "Found no VMs on $($hypervisors -split ',') matching regex `"$vmPattern`""
+                Write-Warning "Found no VMs on $($hypervisors -split ',') matching regex `"$name`""
             }
         }
     }
