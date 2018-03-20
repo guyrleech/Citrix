@@ -737,7 +737,7 @@ if( $hypervisors -and $hypervisors.Count )
     Write-Progress -Activity "Connecting to hypervisors $($hypervisors -split ' ')" -PercentComplete 0
 
     $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
-    if( Connect-VIserver -Server $hypervisors ) ## if errors then will tell us here and later we detect if connected before trying to get VM details
+    if( Connect-VIserver -Server $hypervisors )
     {
         $null = $columns.Add( 'CPUs')
         $null = $columns.Add( 'Memory (GB)')
@@ -750,7 +750,7 @@ if( $hypervisors -and $hypervisors.Count )
         {
             $vms.Add( $_.Name , $_ )
         }
-        Write-Verbose "Got $($vms.Count) from $($hypervisors -split ' ')"
+        Write-Verbose "Got $($vms.Count) vms from $($hypervisors -split ' ')"
     }
 }
 elseif( $vmPattern )
@@ -824,7 +824,7 @@ ForEach( $pvsServer in $pvsServers )
         [hashtable]$fields = @{}
 
         Show-Profiling -Info "Got disk Info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-        if( ( Get-Variable -Name global:DefaultVIServers -ErrorAction SilentlyContinue ) -and $global:DefaultVIServers.Count )
+        if( $vms -and $vms.count )
         {
             Show-Profiling -Info "Getting VMware info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
             $vm = $vms[ $device.Name ]
@@ -1143,7 +1143,7 @@ if( $devices -and $devices.Count )
 {
     if( ! [string]::IsNullOrEmpty( $csv ) )
     {
-        $devices.GetEnumerator() | ForEach-Object { $_.Value | Select $columns } | Sort Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
+        $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
     }
     else
     {
@@ -1161,7 +1161,7 @@ if( $devices -and $devices.Count )
         {
             $title += " matching `"$name`""
         }
-        [array]$selected = @( $devices.GetEnumerator() | ForEach-Object { $_.Value | Select $columns } | Select $columns | Sort Name | Out-GridView -Title $title @Params )
+        [array]$selected = @( $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Out-GridView -Title $title @Params )
         if( $selected -and $selected.Count )
         {
             $mainForm = Load-GUI $pvsDeviceActionerXAML
