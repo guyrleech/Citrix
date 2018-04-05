@@ -23,7 +23,7 @@
 
     22/02/18    GL  Added capability to include machines retrieved from DDCs which are not present in PVS
                     Changed main device collection to .NET array so we can add potential orphans to it
-                    Added MaxRecordCount parameter for DDC calls
+                    Added MaxRecordCount parameter for DDC
 
     25/02/18    GL  Added GUI options to remove from PVS and DDC
 
@@ -41,6 +41,12 @@
     18/03/18    GL  Disable Remove from Hypervisor and AD buttons if not available
                     Added profiling and optimised
                     Made MessageBox calls app modal as well as system
+
+    20/03/18    GL  Added remote memory, CPU and hard disk status via WMI/CIM
+                    Added -help option
+
+    21/03/18    GL  Changed action UI to use context menus rather than buttons
+                    Added vdisk file size
 #>
 
 <#
@@ -77,9 +83,14 @@ Save the PVS and DDC servers to the registry for later use with -registry. Use -
 
 Path to a csv file that will have the results written to it. If none specified then output will be on screen to a grid view
 
-.PARAMETER noBootTime
+.PARAMETER cpuSamples
 
-Will not try and contact active devices to find their last boot time. If WinRM not setup correctly or other issues mean remote calls will fail then this option can speed the script up
+The number of CPU usage samples to gather from a remote system if -noRemoting is not specified. The higher the number, the more accurate the figure but the longer it will take.
+Set to zero to not gather CPU but still gather other remote data like memory usage and free disk space
+
+.PARAMETER noRemoting
+
+Will not try and contact active devices to gather information like last boot time. If WinRM not setup correctly or other issues mean remote calls will fail then this option can speed the script up
 
 .PARAMETER noOrphans
 
@@ -143,6 +154,10 @@ Timeout in seconds for PVS power commands
 
 Output timings at various points to aid in finding slow parts
 
+.PARAMETER help
+
+Show full help via Get-Help cmdlet
+
 .EXAMPLE
 
 & '.\Get PVS device info.ps1' -pvsservers pvsprod01,pvstest01 -ddcs ddctest02,ddcprod03
@@ -182,7 +197,7 @@ Param
     [string]$serverSet = 'Default' ,
     [string[]]$hypervisors ,
     [string]$csv ,
-    [switch]$noBootTime ,
+    [switch]$noRemoting ,
     [switch]$dns ,
     [string]$name ,
     [switch]$tags ,
@@ -198,13 +213,22 @@ Param
     [int]$timeout = 60 ,
     [switch]$profileCode ,
     [string]$ADgroups ,
+    [int]$cpuSamples = 2 ,
+    [string]$pvsShare ,
+    [switch]$help ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
     [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" ,'VMware.VimAutomation.Core'  ) 
 )
 
-$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance Mode','User Sessions','Boot Time','devicemac','active','enabled',
+if( $help )
+{
+    Get-Help -Name ( & { $myInvocation.ScriptName } ) -Full
+    return
+}
+
+$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
-    'Booted off latest','Disk Description','Cache Type','Disk Size (GB)','Write Cache Size (MB)' )  )
+    'Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
 {
@@ -219,6 +243,18 @@ if( $tags )
 if( ! [string]::IsNullOrEmpty( $ADgroups ) )
 {
    $null = $columns.Add( 'AD Groups')
+}
+
+if( ! $noRemoting )
+{
+    $null = $columns.Add( 'Boot_Time' )
+    $null = $columns.Add( 'Available Memory (GB)' )
+    $null = $columns.Add( 'Committed Memory %' )
+    $null = $columns.Add( 'Free disk space %' )
+    if( $cpuSamples -gt 0 )
+    {
+        $null = $columns.Add( 'CPU Usage %' )
+    }
 }
 
 if( $snapins -and $snapins.Count -gt 0 )
@@ -293,7 +329,63 @@ $messageWindowXAML = @"
 </Window>
 "@
 
-$pvsDeviceActionerXAML = @"
+$pvsDeviceActionerXAML = @'
+<Window x:Name="formDeviceActioner" x:Class="PVSDeviceViewerActions.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:PVSDeviceViewerActions"
+        mc:Ignorable="d"
+        Title="PVS Device Actioner" Height="522.565" Width="401.595">
+    <Grid Margin="0,0,-20.333,-111.667">
+        <ListView x:Name="lstMachines" HorizontalAlignment="Left" Height="452" Margin="23,22,0,0" VerticalAlignment="Top" Width="346">
+            <ListView.ContextMenu>
+                <ContextMenu>
+                    <MenuItem Header="VMware" Name="VMwareContextMenu" >
+                        <MenuItem Header="Power On" Name="VMwarePowerOnContextMenu" />
+                        <MenuItem Header="Power Off" Name="VMwarePowerOffContextMenu" />
+                        <MenuItem Header="Restart" Name="VMwareRestartContextMenu" />
+                        <MenuItem Header="Delete" Name="VMwareDeleteContextMenu" />
+                    </MenuItem>
+                    <MenuItem Header="PVS" Name="PVSContextMenu">
+                        <MenuItem Header="Boot" Name="PVSBootContextMenu" />
+                        <MenuItem Header="Shutdown" Name="PVSShutdownContextMenu" />
+                        <MenuItem Header="Restart" Name="PVSRestartContextMenu" />
+                        <MenuItem Header="Delete" Name="PVSDeleteContextMenu" />
+                    </MenuItem>
+                    <MenuItem Header="DDC" Name="DDCContextMenu" >
+                        <MenuItem Header="Maintenance Mode On" Name="DDCMaintModeOnContextMenu" />
+                        <MenuItem Header="Maintenance Mode Off" Name="DDCMaintModeOffContextMenu" />
+                        <MenuItem Header="Message Users" Name="DDCMessageUsersContextMenu" />
+                        <MenuItem Header="Delete" Name="DDCDeleteContextMenu" />
+                    </MenuItem>
+                    <MenuItem Header="AD" Name="ADContextMenu">
+                        <MenuItem Header="Delete" Name="ADDeleteContextMenu" />
+                    </MenuItem>
+                    <MenuItem Header="Windows" Name="WindowsContextMenu">
+                        <MenuItem Header="Shutdown" Name="WinShutdownModeOnContextMenu" />
+                        <MenuItem Header="Restart" Name="WinRestartContextMenu" />
+                    </MenuItem>
+                </ContextMenu>
+            </ListView.ContextMenu>
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="Device" DisplayMemberBinding ="{Binding 'Name'}" />
+                    <GridViewColumn Header="Boot Time" DisplayMemberBinding ="{Binding 'Boot_Time'}" />
+                    <GridViewColumn Header="Users" DisplayMemberBinding ="{Binding 'User_Sessions'}" />
+                    <GridViewColumn Header="Maintenance Mode" DisplayMemberBinding ="{Binding 'Maintenance_Mode'}" />
+                </GridView>
+            </ListView.View>
+            <ListBoxItem Content="Device"/>
+        </ListView>
+    </Grid>
+</Window>
+
+'@
+
+<#
+ @"
 <Window x:Name="formDeviceActioner" x:Class="PVSDeviceViewerActions.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -328,6 +420,7 @@ $pvsDeviceActionerXAML = @"
 </Window>
 
 "@
+#>
 
 ## Adding so we can make it app modal as well as system
 Add-Type @'
@@ -344,8 +437,8 @@ namespace PInvoke.Win32
 }
 '@
 
+
 Add-Type -TypeDefinition @'
-   // you can also define specific integer values for each enum value
    public enum MessageBoxReturns
    {
       IDYES = 6,
@@ -457,15 +550,10 @@ Function Display-MessageBox( $window , $text , $caption , [System.Windows.Messag
     }
 }
 
-Function Perform-Action
+Function Perform-Action( [string]$action , $form )
 {
-    Param
-    (
-        [ValidateSet('Boot','Reboot','Shutdown','Message','Maintenance Mode On','Maintenance Mode Off','Power Off','Remove From DDC','Remove From PVS','Remove From AD','Remove from Hypervisor')]
-        [string]$action ,
-        $form
-    )
-    
+    $_.Handled = $true
+
     ## Get HWND so we can make app modal dialogues
     $thisWindow = [System.Windows.Interop.WindowInteropHelper]::new($form)
 
@@ -475,9 +563,7 @@ Function Perform-Action
     {
         return
     }
-
-    [bool]$connectedToHypervisor = $false
-
+    
     if( $action -eq 'Message' )
     {
         $messageForm = Load-GUI $messageWindowXAML
@@ -500,33 +586,6 @@ Function Perform-Action
             }
         }
     }
-    elseif( $action -eq 'Remove from Hypervisor' -or ( $hypervisors.Count -and ( $action -eq 'Boot' -or $action -eq 'Power Off' ) ) )
-    {
-        if( ! ( Get-Variable -Name global:DefaultVIServers -ErrorAction SilentlyContinue ) -or ! $global:DefaultVIServers.Count )
-        {
-            if( ! $hypervisors -or ! $hypervisors.Count )
-            {
-                Display-MessageBox -window $thisWindow -text 'Must specify hypervisor(s) for this action via -hypervisors' -caption $action -buttons OK -icon Error
-            }
-            else
-            {
-                $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
-                if( ! ( Connect-VIserver -Server $hypervisors ) )
-                {
-                    Display-MessageBox -window $thisWindow -text "Failed to connect to hypervisor(s) $($hypervisors -split ' ')" -caption $action -buttons OK -icon Error
-                    return
-                }
-                else
-                {
-                    $connectedToHypervisor = $true
-                }
-            }
-        }
-        else
-        {
-            $connectedToHypervisor = $true
-        }
-    }
     
     if( $form )
     {
@@ -541,82 +600,72 @@ Function Perform-Action
 
         switch -regex ( $action )
         {
-            'Remove from Hypervisor' `
-            {
-                if( $connectedToHypervisor )
-                {
-                    Get-VM -Name $device.Name | Remove-VM -DeletePermanently -Confirm:$false
-                }
-            }
-            'Remove From AD' { Remove-ADComputer -Identity $device.Name -Confirm:$False }
+            'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName ( $env:USERDOMAIN + '\' +  $device.Name ) | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  ;break }
+            'Remove From AD' { Remove-ADComputer -Identity $device.Name -Confirm:$False ;break }
             'Remove From DDC' { Remove-BrokerMachine -Force -AdminAddress $device.ddc -MachineName $( if( [string]::IsNullOrEmpty( $device.DomainName ) ) { $device.Name } else {  $device.DomainName + '\' +  $device.Name } ) ; break  }
             'Remove From PVS' { Set-PvsConnection -Server $device.'PVS Server'; Remove-PvsDevice -DeviceName $device.Name ; break }
-            'Maintenance Mode On'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
+            'Maintenance Mode On'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true  -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
             'Maintenance Mode Off' { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $false -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
             'Reboot' { Restart-Computer -ComputerName $device.Name ; break }
             'Shutdown' { Stop-Computer -ComputerName $device.Name ; break }
-            'Boot|Power Off' ` ##  Can't use New-BrokerHostingPowerAction as may not be known to DDC
+            'Remove from Hypervisor' { Get-VM -Name $device.Name | Remove-VM -DeletePermanently -Confirm:$false ;break }
+            'VMware Boot' { Get-VM -Name $device.name | Start-VM -Confirm:$false  ;break }
+            'VMware Power Off' { Get-VM -Name $device.name | Stop-VM -Confirm:$false ;break  }
+            'VMware Restart' {  Get-VM -Name $device.name | Restart-VM -Confirm:$false ;break }
+            'PVS Boot|PVS Power Off|PVS Restart' ` ##  Can't use New-BrokerHostingPowerAction as may not be known to DDC
             { 
-                if( $connectedToHypervisor )
+                Set-PvsConnection -Server $device.'PVS Server'
+                if( $_ -match 'Boot' )
                 {
-                    if( $_ -eq 'Boot' )
+                    if( [string]::IsNullOrEmpty( $device.'Disk Name' ) )
                     {
-                        Get-VM -Name $device.name | Start-VM -Confirm:$false
-                    }
-                    else
-                    {
-                        Get-VM -Name $device.name | Stop-VM -Confirm:$false
-                    }
-                }
-                else ## try and use PVS as no hypervisor connection
-                {
-                    Set-PvsConnection -Server $device.'PVS Server'
-                    if( $_ -eq 'Boot' )
-                    {
-                        if( [string]::IsNullOrEmpty( $device.'Disk Name' ) )
-                        {
-                            $answer = Display-MessageBox -window $thisWindow -text "$($device.Name) has no vdisk assigned so may not boot - continue ?" -caption 'Confirm' -buttons YesNo -icon Question
+                        $answer = Display-MessageBox -window $thisWindow -text "$($device.Name) has no vdisk assigned so may not boot - continue ?" -caption 'Confirm' -buttons YesNo -icon Question
 
-                            if( $answer -ne 'Yes' )
-                            {
-                                continue
-                            }
-                        }
-                        $thePvsTask = Start-PvsDeviceBoot -DeviceName $device.Name
-                    }
-                    else
-                    {
-                        $thePvsTask = Start-PvsDeviceShutdown -DeviceName $device.Name
-                    }
-                    $timer = [Diagnostics.Stopwatch]::StartNew()
-                    [bool]$timedOut = $false
-                    while ( $thePvsTask -and $thePvsTask.State -eq 0 ) 
-                    {
-                        $percentFinished = Get-PvsTaskStatus -Object $thePvsTask 
-                        if( ! $percentFinished -or $percentFinished.ToString() -ne 100 )
+                        if( $answer -ne 'Yes' )
                         {
-                            Start-Sleep -timer 500
-                            if( $timer.Elapsed.TotalSeconds -gt $timeout )
-                            {
-                                $timeOut = $true
-                                break
-                            }
+                            continue
                         }
-                        $thePvsTask = Get-PvsTask -Object $thePvsTask
                     }
-                    $timer.Stop()
-                
-                    if ( $timedOut )
-                    {
-                        Display-MessageBox -window $thisWindow -text "Failed to perform action on $($device.Name) - timed out after $timeout seconds" -caption $action -buttons OK -icon Error
-                    } 
-                    elseif ( ! $thePvsTask -or $thePvsTask.State -ne 2)
-                    {
-                        Display-MessageBox -window $thisWindow -text "Failed to perform action on $($device.Name)" -caption $action -buttons OK -icon Error
-                    }
+                    $thePvsTask = Start-PvsDeviceBoot -DeviceName $device.Name
                 }
-             } 
-            'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName ( $env:USERDOMAIN + '\' +  $device.Name ) | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  }
+                elseif( $_ -match 'Off' )
+                {
+                    $thePvsTask = Start-PvsDeviceShutdown -DeviceName $device.Name
+                }
+                elseif( $_ -match 'Restart' )
+                {
+                    $thePvsTask = Start-PvsDeviceReboot -DeviceName $device.Name
+                }
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                [bool]$timedOut = $false
+                while ( $thePvsTask -and $thePvsTask.State -eq 0 ) 
+                {
+                    $percentFinished = Get-PvsTaskStatus -Object $thePvsTask 
+                    if( ! $percentFinished -or $percentFinished.ToString() -ne 100 )
+                    {
+                        Start-Sleep -timer 500
+                        if( $timer.Elapsed.TotalSeconds -gt $timeout )
+                        {
+                            $timeOut = $true
+                            break
+                        }
+                    }
+                    $thePvsTask = Get-PvsTask -Object $thePvsTask
+                }
+                $timer.Stop()
+                
+                if ( $timedOut )
+                {
+                    Display-MessageBox -window $thisWindow -text "Failed to perform action on $($device.Name) - timed out after $timeout seconds" -caption $action -buttons OK -icon Error
+                    $errors++
+                } 
+                elseif ( ! $thePvsTask -or $thePvsTask.State -ne 2)
+                {
+                    Display-MessageBox -window $thisWindow -text "Failed to perform action on $($device.Name)" -caption $action -buttons OK -icon Error
+                    $errors++
+                }
+             }
+            default { Write-Warning "Unknown command `"$action`"" }
         }
         if( ! $? )
         {
@@ -679,6 +728,33 @@ Function Get-ADMachineInfo
     }
 }
 
+Function Get-RemoteInfo( [string]$computer , [int]$cpuSamples )
+{
+    [scriptblock]$remoteWork = `
+    {
+        $osinfo = Get-CimInstance Win32_OperatingSystem
+        $logicalDisks = Get-CimInstance -ClassName Win32_logicaldisk -Filter 'DriveType = 3'
+        $cpu = $(if( $using:cpuSamples -gt 0 ) { [math]::Round( ( 1..$usage:cpuSamples | ForEach-Object { Get-Counter -Counter '\Processor(*)\% Processor Time'|select -ExpandProperty CounterSamples| Where-Object { $_.InstanceName -eq '_total' }|select -ExpandProperty CookedValue } | Measure-Object -Average ).Average , 1 ) })
+        $osinfo,$logicalDisks,$cpu
+    }
+    try
+    {
+        $osinfo,$logicalDisks,$cpu = Invoke-Command -ComputerName $computer -ScriptBlock $remoteWork
+        @{
+            'Boot_Time' = $osinfo.LastBootUpTime
+            'Available Memory (GB)' = [Math]::Round( $osinfo.FreePhysicalMemory / 1MB , 1 )
+            'Committed Memory %' = 100 - [Math]::Round( ( $osinfo.FreeVirtualMemory / $osinfo.TotalVirtualMemorySize ) * 100 , 1 )
+            'CPU Usage %' = $cpu
+            'Free disk space %' = ( $logicalDisks | Sort DeviceID | ForEach-Object { [Math]::Round( ( $_.FreeSpace / $_.Size ) * 100 , 1 ) }) -join ' '
+        }
+    }
+    catch
+    {
+        Write-Error "Failed to get remote info from $computer : $($_.ToString())"
+        $null
+    }
+}
+
 if( $noProgress )
 {
     $ProgressPreference = 'SilentlyContinue'
@@ -722,7 +798,7 @@ if( $hypervisors -and $hypervisors.Count )
         return
     }
 
-    Write-Progress -Activity "Connecting to hypervisors $($hypervisors -split ' ')" -PercentComplete 0
+    Write-Progress -Activity "Connecting to hypervisors $($hypervisors -split ' ')" -PercentComplete 1
 
     $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
     if( Connect-VIserver -Server $hypervisors )
@@ -785,6 +861,13 @@ ForEach( $pvsServer in $pvsServers )
         $deviceInfos.Add( $_.DeviceId , $_ )
     }
 
+    ## Cache store locations so we can look up vdisk sizes
+    [hashtable]$stores = @{}
+    Get-PvsStore | ForEach-Object `
+    {
+        $stores.Add( $_.StoreName , $_.Path )
+    }
+
     ## Get all devices so we can do progress
     $pvsDevices = @( Get-PvsDevice | Where-Object { $_.Name -match $name })
     [decimal]$eachDevicePercent = 100 / [Math]::Max( $pvsDevices.Count , 1 ) ## avoid divide by zero if no devices found
@@ -798,10 +881,10 @@ ForEach( $pvsServer in $pvsServers )
             $profiler.Restart()
         }
         $counter++
-        [decimal]$percentComplete = $counter * $eachDevicePercent
-        Write-Progress -Activity "Processing $($pvsDevices.Count) devices from PVS server $pvsServer" -Status "$([math]::Round( $percentComplete )) % complete" -PercentComplete $percentComplete
-
         $device = $_
+        [decimal]$percentComplete = $counter * $eachDevicePercent
+        Write-Progress -Activity "Processing $($pvsDevices.Count) devices from PVS server $pvsServer" -Status "$($device.name)" -PercentComplete $percentComplete
+
         [int]$bootVersion = -1
         $vDisk = Get-PvsDiskInfo -DeviceId $_.DeviceId
         [hashtable]$fields = @{}
@@ -823,18 +906,15 @@ ForEach( $pvsServer in $pvsServers )
             }
         }
 
-        if( $device.Active -and ! $noBootTime )
+        if( $device.Active -and ! $noRemoting )
         {
-            Show-Profiling -Info "Getting boot time" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $device.Name -ErrorAction SilentlyContinue | Select -ExpandProperty LastBootUpTime
-            if( $bootTime )
+            Show-Profiling -Info "Getting remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
+            $remoteInfo = Get-RemoteInfo -computer $device.Name -cpuSamples $cpuSamples
+            if( $remoteInfo )
             {
-                $fields.Add( 'Boot Time' , $bootTime )
+                $fields += $remoteInfo
             }
-            else
-            {
-                Write-Warning "Failed to get boot time for $($device.Name)"
-            }
+            Show-Profiling -Info "Got remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
         }
         $fields.Add( 'PVS Server' , $pvsServer )
         $versions = $null
@@ -866,20 +946,63 @@ ForEach( $pvsServer in $pvsServers )
             {
                 ## Now get latest production version of this vdisk
                 $override = $versions | Where-Object { $_.Access -eq 3 } 
-                $lastestProductionVersion = $versions | Where-Object { $_.Access -eq 0 } | Sort Version -Descending | Select -First 1 | select -ExpandProperty Version
+                $vdiskFile = $null
+                $latestProduction = $versions | Where-Object { $_.Access -eq 0 } | Sort Version -Descending | Select -First 1 
+                if( $latestProduction )
+                {
+                    $vdiskFile = $latestProduction.DiskFileName
+                    $latestProductionVersion = $latestProduction.Version
+                }
+                else
+                {
+                    $latestProductionVersion = $null
+                }
                 if( $override )
                 {
                     $bootVersion = $override.Version
+                    $vdiskFile = $override.DiskFileName
                 }
                 else
                 {
                     ## Access: Read-only access of the Disk Version. Values are: 0 (Production), 1 (Maintenance), 2 (MaintenanceHighestVersion), 3 (Override), 4 (Merge), 5 (MergeMaintenance), 6 (MergeTest), and 7 (Test) Min=0, Max=7, Default=0
-                    $bootVersion = $lastestProductionVersion
+                    $bootVersion = $latestProductionVersion
+                }
+                if( $vdiskFile)
+                {
+                    ## Need to see if Store path is local to the PVS server and if so convert to a share so we can get vdisk file info
+                    if( $stores[ $vdisk.StoreName ] -match '^([A-z]):(.*$)' )
+                    {
+                        if( [string]::IsNullOrEmpty( $pvsShare ) )
+                        {
+                            $vdiskfile = Join-Path ( Join-Path ( '\\' + $pvsServer + '\' + "$($Matches[1])`$"  ) $Matches[2] ) $vdiskFile ## assume regular admin share
+                        }
+                        else
+                        {
+                            $vdiskfile = Join-Path ( Join-Path ( '\\' + $pvsServer + '\' + $pvsShare ) ) $vdiskFile
+                        }
+                    }
+                    else
+                    {
+                        $vdiskFile = Join-Path $stores[ $vdisk.StoreName ] $vdiskFile
+                    }
+                    if( ( Test-Path $vdiskFile -ErrorAction SilentlyContinue ) )
+                    {
+                        $fields += @{ 'vDisk Size (GB)' = [math]::Round( (Get-ItemProperty -Path $vdiskFile).Length / 1GB ) }
+                    }
+                    else
+                    {
+                        Write-Warning "Could not find disk `"$vdiskFile`" for $($device.name)"
+                    }
+                }
+                if( $latestProductionVersion -eq $null -and $override )
+                {
+                    ## No production version, only an override so this must be the latest production version
+                    $latestProductionVersion = $override.Version
                 }
                 $fields += @{
                     'Override Version' = $( if( $override ) { $bootVersion } else { $null } ) 
-                    'Vdisk Latest Version' = $lastestProductionVersion 
-                    'Latest Version Description' = $( $versions | Where-Object { $_.Version -eq $lastestProductionVersion } | Select -ExpandProperty Description )  
+                    'Vdisk Latest Version' = $latestProductionVersion 
+                    'Latest Version Description' = $( $versions | Where-Object { $_.Version -eq $latestProductionVersion } | Select -ExpandProperty Description )  
                 }      
             }
             $fields.Add( 'Vdisk Production Version' ,$bootVersion )
@@ -942,8 +1065,8 @@ ForEach( $pvsServer in $pvsServers )
                         'Machine Catalogue' = $machine.CatalogName
                         'Delivery Group' = $machine.DesktopGroupName
                         'Registration State' = $machine.RegistrationState
-                        'User Sessions' = $machine.SessionCount
-                        'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
+                        'User_Sessions' = $machine.SessionCount
+                        'Maintenance_Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
                         'DDC' = $ddc
                     }
                     if( $tags )
@@ -1025,22 +1148,14 @@ if( ! $noOrphans )
                             'Machine Catalogue' = $machine.CatalogName
                             'Delivery Group' = $machine.DesktopGroupName
                             'Registration State' = $machine.RegistrationState
-                            'Maintenance Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
-                            'User Sessions' = $machine.SessionCount ; }
+                            'Maintenance_Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
+                            'User_Sessions' = $machine.SessionCount ; }
 
                         Get-ADMachineInfo -name $newItem.Name -adparams $adparams -adGroups $ADgroups -item $newItem
 
-                        if( ! $noBootTime )
+                        if( ! $noRemoting )
                         {
-                            $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $newItem.Name  -ErrorAction SilentlyContinue| Select -ExpandProperty LastBootUpTime
-                            if( $bootTime )
-                            {
-                                Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
-                            }
-                            else
-                            {
-                                Write-Warning "Failed to get boot time for orphan $($newItem.Name)"
-                            }
+                            Add-Member -InputObject $newItem -NotePropertyMembers ( Get-RemoteInfo -computer $newItem.Name -cpuSamples $cpuSamples )
                         }
                         if( $tags )
                         {
@@ -1091,17 +1206,9 @@ if( ! $noOrphans )
 
                 if( $vmwareVM.PowerState -eq 'PoweredOn' )
                 {
-                    if( ! $noBootTime )
+                    if( ! $noRemoting )
                     {
-                        $bootTime = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $newItem.Name -ErrorAction SilentlyContinue | Select -ExpandProperty LastBootUpTime
-                        if( $bootTime )
-                        {
-                            Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'Boot Time' -value $bootTime
-                        }
-                        else
-                        {
-                            Write-Warning "Failed to get boot time for orphan $($newItem.Name)"
-                        }
+                        Add-Member -InputObject $newItem -NotePropertyMembers ( Get-RemoteInfo -computer $newItem.Name -cpuSamples $cpuSamples )
                     }
                     if( $dns )
                     {
@@ -1158,29 +1265,37 @@ if( $devices -and $devices.Count )
 
             if( $hypervisors -and $hypervisors.Count )
             {
-                $WPFbtnRemoveFromHypervisor.Add_Click({ Perform-Action -action 'Remove From Hypervisor' -form $mainForm })
+                $WPFVMwarePowerOnContextMenu.Add_Click({ Perform-Action -action 'VMware Boot' -form $mainForm })
+                $WPFVMwarePowerOffContextMenu.Add_Click({ Perform-Action -action 'VMware Power Off' -form $mainForm })
+                $WPFVMwareRestartContextMenu.Add_Click({ Perform-Action -action 'VMware Restart' -form $mainForm })
+                $WPFVMwareDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From Hypervisor' -form $mainForm })
             }
             else
             {
-                $WPFbtnRemoveFromHypervisor.IsEnabled = $false
+                $WPFVMwareContextMenu.IsEnabled = $false
             }
             if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
             {
-                $WPFbtnRemoveFromAD.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
+                $WPFADDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
             }
             else
             {
-                $WPFbtnRemoveFromAD.IsEnabled = $false
+                $WPFADContextMenu.IsEnabled = $false
             }
-            $WPFbtnRemoveFromDDC.Add_Click({ Perform-Action -action 'Remove From DDC' -form $mainForm })
-            $WPFbtnRemoveFromPVS.Add_Click({ Perform-Action -action 'Remove From PVS' -form $mainForm })
-            $WPFbtnMaintModeOff.Add_Click({ Perform-Action -action 'Maintenance Mode Off' -form $mainForm })
-            $WPFbtnMaintModeOn.Add_Click({ Perform-Action -action 'Maintenance Mode Off'  -form $mainForm })
-            $WPFbtnShutdown.Add_Click({ Perform-Action -action Shutdown -form $mainForm })
-            $WPFbtnRestart.Add_Click({ Perform-Action -action Reboot -form $mainForm  })
-            $WPFbtnBoot.Add_Click({ Perform-Action -action Boot -form $mainForm })
-            $WPFbtnPowerOff.Add_Click({ Perform-Action -action 'Power Off' -form $mainForm  })
-            $WPFbtnMessageUsers.Add_Click({ Perform-Action -action Message -form $mainForm })
+            
+            $WPFDDCMessageUsersContextMenu.Add_Click({ Perform-Action -action Message -form $mainForm })
+            $WPFDDCDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From DDC' -form $mainForm })
+            $WPFDDCMaintModeOffContextMenu.Add_Click({ Perform-Action -action 'Maintenance Mode Off' -form $mainForm })
+            $WPFDDCMaintModeOnContextMenu.Add_Click({ Perform-Action -action 'Maintenance Mode On'  -form $mainForm })
+
+            $WPFWinShutdownModeOnContextMenu.Add_Click({ Perform-Action -action Shutdown -form $mainForm })
+            $WPFWinRestartContextMenu.Add_Click({ Perform-Action -action Reboot -form $mainForm  })
+
+            $WPFPVSDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From PVS' -form $mainForm })
+            $WPFPVSBootContextMenu.Add_Click({ Perform-Action -action 'PVS Boot' -form $mainForm })
+            $WPFPVSShutdownContextMenu.Add_Click({ Perform-Action -action 'PVS Power Off' -form $mainForm  })
+            $WPFPVSRestartContextMenu.Add_Click({ Perform-Action -action 'PVS Restart' -form $mainForm  })
+
             $WPFlstMachines.Items.Clear()
             $WPFlstMachines.ItemsSource = $selected
             ## Select all items since already selected them in grid view
