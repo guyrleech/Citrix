@@ -47,6 +47,9 @@
 
     21/03/18    GL  Changed action UI to use context menus rather than buttons
                     Added vdisk file size
+
+    06/04/18    GL  Retry count, device IP and PVS server booted from fields added
+                    -noGridview option added and will produce both csv and gridview if -csv specified unless -nogridview used
 #>
 
 <#
@@ -81,7 +84,11 @@ Save the PVS and DDC servers to the registry for later use with -registry. Use -
 
 .PARAMETER csv
 
-Path to a csv file that will have the results written to it. If none specified then output will be on screen to a grid view
+Path to a csv file that will have the results written to it.
+
+.PARAMETER noGridView
+
+Do not produce an on screen grid view containing the results. Default behaviour will display one.
 
 .PARAMETER cpuSamples
 
@@ -197,22 +204,23 @@ Param
     [string]$serverSet = 'Default' ,
     [string[]]$hypervisors ,
     [string]$csv ,
-    [switch]$noRemoting ,
     [switch]$dns ,
     [string]$name ,
     [switch]$tags ,
+    [string]$ADgroups ,
     [switch]$noProgress ,
-    [ValidateSet('PVS','MCS','Manual')]
-    [string]$provisioningType = 'PVS' ,
+    [switch]$noRemoting ,
     [switch]$noMenu ,
     [switch]$noOrphans ,
+    [switch]$noGridView ,
+    [ValidateSet('PVS','MCS','Manual')]
+    [string]$provisioningType = 'PVS' ,
     [string]$configRegKey = 'HKCU:\software\Guy Leech\PVS Fetcher' ,
     [string]$messageText ,
     [string]$messageCaption ,
     [int]$maxRecordCount = 2000 ,
     [int]$timeout = 60 ,
     [switch]$profileCode ,
-    [string]$ADgroups ,
     [int]$cpuSamples = 2 ,
     [string]$pvsShare ,
     [switch]$help ,
@@ -228,7 +236,7 @@ if( $help )
 
 $columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
-    'Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
+    'Retries','Booted Off','Device IP','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
 {
@@ -1013,6 +1021,12 @@ ForEach( $pvsServer in $pvsServers )
         if( $deviceInfo )
         {
             $fields.Add( 'Disk Version Access' , $accessTypes[ $deviceInfo.DiskVersionAccess ] )
+            $fields.Add( 'Booted Off' , $deviceInfo.ServerName )
+            $fields.Add( 'Device IP' , $deviceInfo.IP )
+            if( ! [string]::IsNullOrEmpty( $deviceInfo.Status ) )
+            {
+                $fields.Add( 'Retries' , ($deviceInfo.Status -split ',')[0] -as [int] ) ## scond value is supposedly RAM cache used percent but I've not seen it set
+            }
             if( $device.Active )
             {
                 ## Check if booting off the disk we should be as previous info is what is assigned, not what is necessarily being used (e.g. vdisk changed for device whilst it is booted)
@@ -1235,7 +1249,7 @@ if( $devices -and $devices.Count )
     {
         $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
     }
-    else
+    if( ! $noGridView )
     {
         [hashtable]$params = @{}
         if( $noMenu )
