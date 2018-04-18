@@ -50,6 +50,9 @@
 
     06/04/18    GL  Retry count, device IP and PVS server booted from fields added
                     -noGridview option added and will produce both csv and gridview if -csv specified unless -nogridview used
+    
+    17/04/18    GL  Implemented timeout when getting remote information as Invoke-Command can take up to 25 minutes to timeout.
+                    Added remote domain health check via Test-ComputerSecureChannel and AD account modification time
 #>
 
 <#
@@ -102,6 +105,10 @@ Will not try and contact active devices to gather information like last boot tim
 .PARAMETER noOrphans
 
 Do not display machines which are present on DDCs/Studio but not in PVS. May be physical, MCS or VMs with local disks or could be orphans that did exist in PVS but do not any longer.
+
+.PARAMETER jobTimeout
+
+Timeout in seconds for the command to retrieve information remotely from a device.
 
 .PARAMETER maxRecordCount
 
@@ -219,6 +226,7 @@ Param
     [string]$messageText ,
     [string]$messageCaption ,
     [int]$maxRecordCount = 2000 ,
+    [int]$jobTimeout = 120 ,
     [int]$timeout = 60 ,
     [switch]$profileCode ,
     [int]$cpuSamples = 2 ,
@@ -235,7 +243,7 @@ if( $help )
 }
 
 $columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
-    'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
+    'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Account Modified','Domain Membership','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
     'Retries','Booted Off','Device IP','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
@@ -391,44 +399,6 @@ $pvsDeviceActionerXAML = @'
 </Window>
 
 '@
-
-<#
- @"
-<Window x:Name="formDeviceActioner" x:Class="PVSDeviceViewerActions.MainWindow"
-        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:PVSDeviceViewerActions"
-        mc:Ignorable="d"
-        Title="PVS Device Actioner" Height="522.565" Width="401.595">
-    <Grid Margin="0,0,-20.333,-111.667">
-        <ListView x:Name="lstMachines" HorizontalAlignment="Left" Height="452" Margin="23,22,0,0" VerticalAlignment="Top" Width="140">
-            <ListView.View>
-                <GridView>
-                    <GridViewColumn Header="Device" DisplayMemberBinding ="{Binding 'Name'}" />
-                </GridView>
-            </ListView.View>
-            <ListBoxItem Content="Device"/>
-        </ListView>
-        <StackPanel x:Name="stkButtons" Margin="198,22,36,28" Orientation="Vertical">
-            <Button x:Name="btnShutdown" Content="_Shutdown" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnPowerOff" Content="_Power Off" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnRestart" Content="_Restart" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnBoot" Content="_Boot" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnMessageUsers" Content="_Message Users" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnMaintModeOn" Content="Maintenance Mode O_n" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnMaintModeOff" Content="Maintenance Mode O_ff" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnRemoveFromDDC" Content="Remove from _DDC" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnRemoveFromPVS" Content="Remove from P_VS" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnRemoveFromAD" Content="Remove from _AD" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-            <Button x:Name="btnRemoveFromHypervisor" Content="Remove from _Hypervisor" HorizontalAlignment="Left" Height="27" VerticalAlignment="Top" Width="149" Margin="0 0 0 15" />
-        </StackPanel>
-    </Grid>
-</Window>
-
-"@
-#>
 
 ## Adding so we can make it app modal as well as system
 Add-Type @'
@@ -726,41 +696,87 @@ Function Get-ADMachineInfo
             @{
                 'AD Account Created' = $adAccount.Created
                 'AD Last Logon' = $adAccount.LastLogonDate
+                'AD Account Modified' = $adaccount.Modified
                 'AD Description' = $adAccount.Description
                 'AD Groups' = $groups
             }
         }
-        catch
-        {
-        }
+        catch {}
     }
 }
 
 Function Get-RemoteInfo( [string]$computer , [int]$cpuSamples )
 {
-    [scriptblock]$remoteWork = `
+    [hashtable]$results = @{}
+
+    [scriptblock]$code = `
     {
-        $osinfo = Get-CimInstance Win32_OperatingSystem
-        $logicalDisks = Get-CimInstance -ClassName Win32_logicaldisk -Filter 'DriveType = 3'
-        $cpu = $(if( $using:cpuSamples -gt 0 ) { [math]::Round( ( 1..$usage:cpuSamples | ForEach-Object { Get-Counter -Counter '\Processor(*)\% Processor Time'|select -ExpandProperty CounterSamples| Where-Object { $_.InstanceName -eq '_total' }|select -ExpandProperty CookedValue } | Measure-Object -Average ).Average , 1 ) })
-        $osinfo,$logicalDisks,$cpu
+        Param([string]$computer,[int]$cpuSamples)
+        Invoke-Command -ComputerName $computer -ScriptBlock `
+        {
+            $osinfo = Get-CimInstance Win32_OperatingSystem
+            $logicalDisks = Get-CimInstance -ClassName Win32_logicaldisk -Filter 'DriveType = 3'
+            $cpu = $(if( $using:cpuSamples -gt 0 ) { [math]::Round( ( Get-Counter -Counter '\Processor(*)\% Processor Time' -SampleInterval 1 -MaxSamples $using:cpuSamples |select -ExpandProperty CounterSamples| Where-Object { $_.InstanceName -eq '_total' } | select -ExpandProperty CookedValue  | Measure-Object -Average ).Average , 1 ) }) -as [int]
+            $domainMembership = Test-ComputerSecureChannel
+            $osinfo,$logicalDisks,$cpu,$domainMembership 
+        }    
     }
+
     try
     {
-        $osinfo,$logicalDisks,$cpu = Invoke-Command -ComputerName $computer -ScriptBlock $remoteWork
-        @{
-            'Boot_Time' = $osinfo.LastBootUpTime
-            'Available Memory (GB)' = [Math]::Round( $osinfo.FreePhysicalMemory / 1MB , 1 )
-            'Committed Memory %' = 100 - [Math]::Round( ( $osinfo.FreeVirtualMemory / $osinfo.TotalVirtualMemorySize ) * 100 , 1 )
-            'CPU Usage %' = $cpu
-            'Free disk space %' = ( $logicalDisks | Sort DeviceID | ForEach-Object { [Math]::Round( ( $_.FreeSpace / $_.Size ) * 100 , 1 ) }) -join ' '
+        ## use a runspace so we can have a timeout  
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.Open()
+        $command = [PowerShell]::Create().AddScript($code)
+        $command.Runspace = $runspace
+        $null = $command.AddParameters( @( $computer , $cpuSamples ) )
+        $job = $command.BeginInvoke()
+
+        ## wait for command to finish
+        $wait = $job.AsyncWaitHandle.WaitOne( $jobTimeout * 1000 , $false )
+
+        if( $wait -or $job.IsCompleted )
+        {
+            if( $command.HadErrors )
+            {
+                Write-Warning "Errors occurred in remote command on $computer :`n$($command.Streams.Error)"
+            }
+            else
+            {
+                $osinfo,$logicalDisks,$cpu,$domainMembership = $command.EndInvoke($job)
+                if( $osinfo ) ## assume that if this is not null then we at least got some info - need to avoid divide by zero
+                {
+                    $results = 
+                    @{
+                        'Boot_Time' = $osinfo.LastBootUpTime
+                        'Available Memory (GB)' = [Math]::Round( $osinfo.FreePhysicalMemory / 1MB , 1 )
+                        'Committed Memory %' = 100 - [Math]::Round( ( $osinfo.FreeVirtualMemory / $osinfo.TotalVirtualMemorySize ) * 100 , 1 )
+                        'CPU Usage %' = $cpu
+                        'Free disk space %' = ( $logicalDisks | Sort DeviceID | ForEach-Object { [Math]::Round( ( $_.FreeSpace / $_.Size ) * 100 , 1 ) }) -join ' '
+                        'Domain Membership' = $( if( $domainMembership ) { 'OK' } else { 'Bad' } )
+                    }
+                }  
+                else
+                {
+                    Write-Warning "No data returned from remote command on $computer"
+                }
+            }   
+            ## if we do these after timeout too then takes an age to return which defeats the point of running via a runspace
+            $command.Dispose() 
+            $runSpace.Dispose()
         }
-    }
+        else
+        {
+            Write-Warning "Job to retrieve info from $computer is still running after $jobTimeout seconds so aborting"
+            $null = $command.BeginStop($null,$null)
+            ## leaking command and runspace but if we dispose it hangs
+        }
+    }   
     catch
     {
         Write-Error "Failed to get remote info from $computer : $($_.ToString())"
-        $null
     }
+    $results
 }
 
 if( $noProgress )
@@ -781,6 +797,8 @@ elseif( $save )
 {
     Save-ConfigToRegistry -serverSet $serverSet  -DDCs $ddcs -PVSServers $pvsServers -hypervisors $hypervisors
 }
+
+[datetime]$startTime = Get-Date
 
 Write-Progress -Activity "Caching information" -PercentComplete 0
 
@@ -833,7 +851,7 @@ if( $PSVersionTable.PSVersion.Major -lt 5 -and $columns.Count -gt 30 -and [strin
 
 [int]$pvsServerCount = 0
 
-[hashtable]$adparams = @{ 'Properties' = @( 'Created' , 'LastLogonDate' , 'Description' )  }
+[hashtable]$adparams = @{ 'Properties' = @( 'Created' , 'LastLogonDate' , 'Description' , 'Modified' )  }
 if( ! [string]::IsNullOrEmpty( $ADgroups ) )
 {
     $adparams[ 'Properties' ] +=  'MemberOf' 
@@ -913,17 +931,18 @@ ForEach( $pvsServer in $pvsServers )
                 }
             }
         }
-
+        
         if( $device.Active -and ! $noRemoting )
         {
             Show-Profiling -Info "Getting remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
             $remoteInfo = Get-RemoteInfo -computer $device.Name -cpuSamples $cpuSamples
-            if( $remoteInfo )
+            if( $remoteInfo -and $remoteInfo.Count )
             {
                 $fields += $remoteInfo
             }
             Show-Profiling -Info "Got remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
         }
+
         $fields.Add( 'PVS Server' , $pvsServer )
         $versions = $null
         if( $vdisk )
@@ -1055,7 +1074,7 @@ ForEach( $pvsServer in $pvsServers )
         {
             Write-Warning "Failed to get PVS device info for id $($device.DeviceId) $($device.Name)"
         }
-
+        
         Get-ADMachineInfo -name $device.Name -adparams $adparams -adGroups $ADgroups -item $device
 
         if( $device.Active -and $dns )
@@ -1260,11 +1279,12 @@ if( $devices -and $devices.Count )
         {
             $params.Add( 'PassThru' , $true )
         }
-        [string]$title = "$($devices.count) PVS devices via $($pvsServers -join ' ') & ddc $($ddcs -join ' ')"
+        [string]$title = "$(Get-Date -Format G) : $($devices.count) PVS devices via $($pvsServers -join ' ') & ddc $($ddcs -join ' ')"
         if( ! [string]::IsNullOrEmpty( $name ) )
         {
             $title += " matching `"$name`""
         }
+      
         [array]$selected = @( $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Out-GridView -Title $title @Params )
         if( $selected -and $selected.Count )
         {
