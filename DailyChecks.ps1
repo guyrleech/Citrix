@@ -9,6 +9,8 @@
 
     02/05/18  GL   Guard around Get-BrokerApplciationGroup so doesn't error on older 7.x, only do highest used machines for XenApp, not VDI
                    Added timeout when getting boot time from machine via function in Guys.Common.Functions.psm1
+
+    08/05/18  GL   Added Ghost session detection to long time disconnected user table
 #>
 
 <#
@@ -80,7 +82,7 @@ Specified how many items will be included where the top n items are displayed, e
 
 .PARAMETER jobTimeout
 
-How long in seconds to wait for a remote machien to return its boot time before aborting the command
+How long in seconds to wait for a remote machine to return its boot time before aborting the command
 
 .PARAMETER logFile
 
@@ -105,7 +107,7 @@ Param
 (
     [string[]]$ddcs = @( $env:Computername ) ,
     [string[]]$pvss = @( ) ,
-    [string[]]$UNCs ,
+    [string[]]$UNCs = @() ,
     [string]$mailserver ,
     [string]$proxyMailServer = 'localhost' ,
     [string]$from = "$env:Computername@$env:userdnsdomain" ,
@@ -198,12 +200,12 @@ if( $pvss.Count -eq 1 -and $pvss[0].IndexOf(',') -ge 0 )
     $pvss = $pvss[0] -split ','
 }
 
-if( $UNCs.Count -eq 1 -and $UNCs[0].IndexOf(',') -ge 0 )
+if( $UNCs -and $UNCs.Count -eq 1 -and $UNCs[0].IndexOf(',') -ge 0 )
 {
     $UNCs = $UNCs[0] -split ','
 }
 
-if( $excludedTags.Count -eq 1 -and $excludedTags[0].IndexOf(',') -ge 0 )
+if( $excludedTags -and $excludedTags.Count -eq 1 -and $excludedTags[0].IndexOf(',') -ge 0 )
 {
     $excludedTags = $excludedTags[0] -split ','
 }
@@ -230,7 +232,7 @@ ForEach( $pvs in $pvss )
     {
         Set-PvsConnection -Server $pvs
         ## Status is comma separated value where first field is the number of retries
-        $pvsRetries += Get-PvsDeviceInfo| Select -Property Name,ServerName,SiteName,CollectionName,DiskLocatorName,
+        $pvsRetries += Get-PvsDeviceInfo| Select -Property Name,@{n='PVS Server';e={$_.ServerName}},SiteName,CollectionName,DiskLocatorName,
             @{n='Retries';e={($_.status -split ',')[0] -as [int]}},DiskVersion
     }
     else
@@ -340,7 +342,7 @@ ForEach( $ddc in $ddcs )
     ## Find sessions and users disconnected more than certain number of minutes
     if( $disconnectedMinutes )
     {
-        $longDisconnectedUsers += @( $users | Where-Object { $_.SessionState -eq 'Disconnected' -and $_.SessionStateChangeTime -lt (Get-Date).AddMinutes( -$disconnectedMinutes ) } | Select UserName,UntrustedUserName,MachineName,StartTime,SessionStateChangeTime,IdleDuration,DesktopGroupName )
+        $longDisconnectedUsers += @( $users | Where-Object { $_.SessionState -eq 'Disconnected' -and $_.SessionStateChangeTime -lt (Get-Date).AddMinutes( -$disconnectedMinutes ) } | Select UserName,UntrustedUserName,@{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},StartTime,SessionStateChangeTime,IdleDuration,DesktopGroupName )
         $body += "`t$($longDisconnectedUsers.Count) users have been disconnected over $disconnectedMinutes minutes`n"
     }
 
@@ -440,8 +442,91 @@ if( $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) )
     {
         $htmlBody += $fileShares  | sort 'Percentage Free Space' | ConvertTo-Html -Fragment -PreContent "<h2>File share capacities<h2>" | Out-String
     }
+    [hashtable]$sessions = @{}
     if( $longDisconnectedUsers -and $longDisconnectedUsers.Count -gt 0 )
     {
+        ## see if any of these are ghosts, as in there isn't a session on the server that Citrix thinks there is
+        ForEach( $disconnectedUser in $longDisconnectedUsers )
+        {
+            [array]$serverSessions = $sessions[ $disconnectedUser.'Machine Name' ]
+            if( ! $serverSessions )
+            {
+                ## Get users from machine - if we just run quser then get error for no users so this method make it squeaky clean
+                $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+                $pinfo.FileName = "quser.exe"
+                $pinfo.Arguments = "/server:$($disconnectedUser.'Machine Name')"
+                $pinfo.RedirectStandardError = $true
+                $pinfo.RedirectStandardOutput = $true
+                $pinfo.UseShellExecute = $false
+                $pinfo.WindowStyle = 'Hidden'
+                $pinfo.CreateNoWindow = $true
+                $process = New-Object System.Diagnostics.Process
+                $process.StartInfo = $pinfo
+                if( $process.Start() )
+                {
+                    if( $process.WaitForExit( $jobTimeout * 1000 ) )
+                    {
+                        ## Output of quser is fixed width but can't do simple parse as SESSIONNAME is empty when session is disconnected so we break it up based on header positions
+                        [string[]]$fieldNames = @( 'USERNAME','SESSIONNAME','ID','STATE','IDLE TIME','LOGON TIME' )
+                        [string[]]$allOutput = $process.StandardOutput.ReadToEnd() -split "`n"
+                        [string]$header = $allOutput[0]
+                        $serverSessions = @( $allOutput | Select -Skip 1 | ForEach-Object `
+                        {
+                            [string]$line = $_
+                            if( ! [string]::IsNullOrEmpty( $line ) )
+                            {
+                                $result = New-Object -TypeName PSCustomObject
+                                For( [int]$index = 0 ; $index -lt $fieldNames.Count ; $index++ )
+                                {
+                                    [int]$startColumn = $header.IndexOf($fieldNames[$index])
+                                    ## if last column then can't look at start of next field so use overall line length
+                                    [int]$endColumn = if( $index -eq $fieldNames.Count - 1 ) { $line.Length } else { $header.IndexOf( $fieldNames[ $index + 1 ] ) }
+                                    try
+                                    {
+                                        Add-Member -InputObject $result -MemberType NoteProperty -Name $fieldNames[ $index ] -Value ( $line.Substring( $startColumn , $endColumn - $startColumn ).Trim() )
+                                    }
+                                    catch
+                                    {
+                                        throw $_
+                                    }
+                                }
+                                $result
+                            }      
+                        } )
+                        $sessions.Add( $disconnectedUser.'Machine Name' , $serverSessions )
+                    }
+                    else
+                    {
+                        Write-Warning ( "Timeout of {0} seconds waiting for process to exit {1} {2}" -f $jobTimeout , $pinfo.FileName , $pinfo.Arguments )
+                    }
+                }
+                else
+                {
+                    Write-Warning ( "Failed to start process {0} {1}" -f $pinfo.FileName , $pinfo.Arguments )
+                }
+            }
+            $usersActualSession = $null
+            if( $serverSessions )
+            {
+                [string]$domainname,$username = $disconnectedUser.UserName -split '\\'
+                if( [string]::IsNullOrEmpty( $username ) )
+                {
+                    $username = ($disconnectedUser.UntrustedUserName -split '\\')[-1]
+                }
+                ForEach( $serverSession in $serverSessions )
+                {
+                    if( $Username -eq $serverSession.UserName )
+                    {
+                        $usersActualSession = $serverSession
+                        break
+                    }
+                }
+            }
+            if( ! $usersActualSession )
+            {
+                Add-Member -InputObject $disconnectedUser -MemberType NoteProperty -Name 'Ghost Session' -Value 'Yes'
+            }
+        }
         $htmlBody += $longDisconnectedUsers | sort SessionStateChangeTime | ConvertTo-Html -Fragment -PreContent "<h2>$($longDisconnectedUsers.Count) users disconnected more than $disconnectedMinutes minutes<h2>"| Out-String
     }
     $htmlBody = ConvertTo-Html -PostContent $htmlBody -Head $style
