@@ -11,6 +11,10 @@
                    Added timeout when getting boot time from machine via function in Guys.Common.Functions.psm1
 
     08/05/18  GL   Added Ghost session detection to long time disconnected user table
+
+    09/05/18  GL   Added tags column to most heavily used machines table
+
+    10/05/18  GL   Added option to exclude machine names via regualr expression
 #>
 
 <#
@@ -56,7 +60,7 @@ The subject of the email
 
 Text to prepend to the subject of the email. Use the default subject but use this option to specify an environment or customer name
 
-.PARAMETER receipients
+.PARAMETER recipients
 
 Comma separated list of email addresses to send the report to
 
@@ -71,6 +75,14 @@ Sessions which have been disconnected longer than this will be reported. Specify
 .PARAMETER lastRebootedDaysAgo
 
 Machines last rebooted more than this number of days ago will be reported on.
+
+.PARAMETER excludedTags
+
+Comma separated list of tag names to exlude from the report
+
+.PARAMETER excludedMachines
+
+Reegular expression to match against machine names to exlude from the report
 
 .PARAMETER excludedTags
 
@@ -114,6 +126,7 @@ Param
     [string]$subject = "Daily checks $(Get-Date -Format F)" ,
     [string]$qualifier ,
     [string[]]$recipients ,
+    [string]$excludedMachines = '^$' ,
     [int]$disconnectedMinutes = 480 ,
     [int]$lastRebootedDaysAgo = 7 ,
     [int]$topCount = 5 ,
@@ -243,8 +256,8 @@ ForEach( $pvs in $pvss )
 
 ForEach( $ddc in $ddcs )
 {
-    [array]$machines = @( Get-BrokerMachine -AdminAddress $ddc -MaxRecordCount $maxRecords )
-    [array]$users = @( Get-BrokerSession -AdminAddress $ddc -MaxRecordCount $maxRecords )
+    [array]$machines = @( Get-BrokerMachine -AdminAddress $ddc -MaxRecordCount $maxRecords | Where-Object { $_.MachineName -notmatch $excludedMachines } )
+    [array]$users = @( Get-BrokerSession -AdminAddress $ddc -MaxRecordCount $maxRecords  | Where-Object { $_.MachineName -notmatch $excludedMachines } )
     [array]$XenAppDeliveryGroups = @( Get-BrokerDesktopGroup -AdminAddress $ddc -SessionSupport MultiSession )
     [int]$registeredMachines = $machines | Where-Object { $_.RegistrationState -eq 'Registered' } | Measure-Object | Select -ExpandProperty Count
 
@@ -289,7 +302,7 @@ ForEach( $ddc in $ddcs )
 
     $poweredOnUnregistered += @( $machines | Where-Object { $_.PowerState -eq 'On' -and $_.RegistrationState -eq 'Unregistered' -and ! $_.InMaintenanceMode } | Select MachineName,DesktopGroupName,CatalogName,SessionCount)
     
-    $notPoweredOn += @( $machines | Where-Object { $_.PowerState -eq 'Off' } | Select MachineName,DesktopGroupName,CatalogName,InMaintenanceMode )
+    $notPoweredOn += @( $machines | Where-Object { $_.PowerState -eq 'Off' } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
 
     $possiblyOverdueReboot += if( $lastRebootedDaysAgo )
     {
@@ -364,7 +377,12 @@ ForEach( $ddc in $ddcs )
     ## only do this for XenApp as doesn't make sense for single user OS in VDI
     if( $XenAppDeliveryGroups -and $XenAppDeliveryGroups.Count )
     {
-        $highestUsedMachines += $machines | Sort SessionCount -Descending | Select -First $topCount -Property MachineName,SessionCount,DesktopGroupName
+        [array]$highestUserCounts = @( $machines | Sort SessionCount -Descending | Select -First $topCount -Property @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},SessionCount,DesktopGroupName,@{n='Tags';e={$_.Tags -join ', '}} )
+        $highestUsedMachines += $highestUserCounts
+        if( $highestUserCounts.Count )
+        {
+            $body += "`tHighest number of concurrent users is $($highestUserCounts[0].SessionCount) on $($highestUserCounts[0].'Machine Name')`n"
+        }
     }
     
     $sites += Get-BrokerSite -AdminAddress $ddc | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv
