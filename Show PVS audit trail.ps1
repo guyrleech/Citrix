@@ -7,6 +7,8 @@
     Modification history:
 
     21/05/18  GL  Initial release
+
+    21/05/18  GL  Added check for auditing enabled and to enable it if disabled
 #>
 
 <#
@@ -31,6 +33,10 @@ Path to a csv file that will have the results written to it.
 
 Show the results in an on screen grid view.
 
+.PARAMETER enableAuditing
+
+If auditing on the farm(s) connected to via the specified PVS server(s) is not enabled then enabel it
+
 .PARAMETER startDate
 
 The start date for audit events to be retrieved. If not specified then the Citrix cmdlet defaults to one week prior to the current date/time
@@ -54,6 +60,7 @@ Param
     [string[]]$pvsServers = @( 'localhost' ) , 
     [string]$csv ,
     [switch]$gridView ,
+    [switch]$enableAuditing ,
     [string]$startDate ,
     [string]$endDate ,
     [string]$pvsModule = "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll"
@@ -293,6 +300,17 @@ $PVSSession = $null
         continue
     }
 
+    ## Check if auditing is enabled
+    $farm = Get-PvsFarm
+    if( $farm -and ! $farm.AuditingEnabled )
+    {
+        Write-Warning "Auditing is not enabled on farm `"$($farm.Name)`" via $pvsServer"
+        if( $enableAuditing )
+        {
+            Set-PvsFarm -FarmId $farm.FarmId -AuditingEnabled:$true
+        }
+    }
+     
     ## Lookup table for site id to name
     Get-PvsSite | ForEach-Object `
     {
