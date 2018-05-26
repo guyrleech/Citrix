@@ -14,7 +14,9 @@
 
     09/05/18  GL   Added tags column to most heavily used machines table
 
-    10/05/18  GL   Added option to exclude machine names via regualr expression
+    10/05/18  GL   Added option to exclude machine names via regular expression
+
+    26/05/18  GL   Added restart schedule statistics for XenApp delivery groups
 #>
 
 <#
@@ -364,6 +366,28 @@ ForEach( $ddc in $ddcs )
     $deliveryGroupStatsXenApp += $XenAppDeliveryGroups | ForEach-Object `
     {
         $deliveryGroup = $_.Name
+        [string]$rebootState = $null
+        [string]$lastRebootsEnded = $null
+        Get-BrokerRebootCycle -DesktopGroupName $deliveryGroup -AdminAddress $ddc | Sort -Property StartTime -Descending | Select -First 1 | ForEach-Object `
+        {
+            if( ! [string]::IsNullOrEmpty( $rebootState ) )
+            {
+                $rebootState += ','
+            }
+            $rebootState += $_.State.ToString()
+            if( ! [string]::IsNullOrEmpty( $lastRebootsEnded ) )
+            {
+                $lastRebootsEnded += ','
+            }
+            if( $_.EndTime )
+            {
+                $lastRebootsEnded += (Get-Date $_.EndTime -Format G).ToString()
+            }
+        }
+        if( [string]::IsNullOrEmpty( $rebootState ) )
+        {
+            $rebootState = 'No schedule'
+        }
         [int]$availableServers = ($machines | Where-Object { $_.DesktopGroupName -eq $deliveryGroup -and $_.RegistrationState -eq 'Registered' -and $_.InMaintenanceMode -eq $false -and $_.WindowsConnectionSetting -eq 'LogonEnabled' } | Measure-Object).Count
         Select-Object -InputObject $_ -Property @{'n'='Delivery Controller';'e'={$ddc}},PublishedName,Description,Enabled,InMaintenanceMode,
             @{n='Available Servers';e={$availableServers}},
@@ -371,7 +395,9 @@ ForEach( $ddc in $ddcs )
             @{n='% machines available';e={[math]::Round( ( $availableServers / $_.TotalDesktops ) * 100 )}},
             @{n='Total Sessions';e={$_.Sessions}},
             @{n='Disconnected Sessions';e={$_.DesktopsDisconnected}},
-            TotalApplications,TotalApplicationGroups
+            TotalApplications,TotalApplicationGroups ,
+            @{n='Restart State';e={$rebootState}} ,
+            @{n='Restarts Ended';e={$lastRebootsEnded}}
     }
 
     ## only do this for XenApp as doesn't make sense for single user OS in VDI
