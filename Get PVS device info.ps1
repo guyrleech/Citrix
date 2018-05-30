@@ -53,6 +53,8 @@
     
     17/04/18    GL  Implemented timeout when getting remote information as Invoke-Command can take up to 25 minutes to timeout.
                     Added remote domain health check via Test-ComputerSecureChannel and AD account modification time
+
+    30/05/18    GL  Added Load indexes
 #>
 
 <#
@@ -242,7 +244,7 @@ if( $help )
     return
 }
 
-$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
+$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Load Index','Load Indexes','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Account Modified','Domain Membership','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
     'Retries','Booted Off','Device IP','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
 
@@ -363,6 +365,10 @@ $pvsDeviceActionerXAML = @'
                         <MenuItem Header="Power Off" Name="VMwarePowerOffContextMenu" />
                         <MenuItem Header="Restart" Name="VMwareRestartContextMenu" />
                         <MenuItem Header="Delete" Name="VMwareDeleteContextMenu" />
+                        <MenuItem Header="Reconfigure" >
+                            <MenuItem Header="CPUs" Name="VMwareReconfigCPUsContextMenu" />
+                            <MenuItem Header="Memory" Name="VMwareReconfigMemoryContextMenu" />
+                        </MenuItem>
                     </MenuItem>
                     <MenuItem Header="PVS" Name="PVSContextMenu">
                         <MenuItem Header="Boot" Name="PVSBootContextMenu" />
@@ -1044,7 +1050,7 @@ ForEach( $pvsServer in $pvsServers )
             $fields.Add( 'Device IP' , $deviceInfo.IP )
             if( ! [string]::IsNullOrEmpty( $deviceInfo.Status ) )
             {
-                $fields.Add( 'Retries' , ($deviceInfo.Status -split ',')[0] -as [int] ) ## scond value is supposedly RAM cache used percent but I've not seen it set
+                $fields.Add( 'Retries' , ($deviceInfo.Status -split ',')[0] -as [int] ) ## second value is supposedly RAM cache used percent but I've not seen it set
             }
             if( $device.Active )
             {
@@ -1099,6 +1105,8 @@ ForEach( $pvsServer in $pvsServers )
                         'Delivery Group' = $machine.DesktopGroupName
                         'Registration State' = $machine.RegistrationState
                         'User_Sessions' = $machine.SessionCount
+                        'Load Index' = $machine.LoadIndex
+                        'Load Indexes' = $machine.LoadIndexes -join ','
                         'Maintenance_Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
                         'DDC' = $ddc
                     }
