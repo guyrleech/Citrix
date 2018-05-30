@@ -17,6 +17,10 @@
     10/05/18  GL   Added option to exclude machine names via regular expression
 
     26/05/18  GL   Added restart schedule statistics for XenApp delivery groups
+
+    27/05/18  GL   Added tags to overdue reboot 
+
+    30/05/18  GL   Added LoadIndex and LoadIndexes columns
 #>
 
 <#
@@ -195,6 +199,7 @@ ForEach( $module in $modules )
 [array]$poweredOnUnregistered = @()
 [array]$longDisconnectedUsers = @()
 [array]$highestUsedMachines = @()
+[array]$highestLoadIndexes = @()
 [array]$sites = @()
 [array]$pvsRetries = @()
 [array]$fileShares = @()
@@ -333,12 +338,12 @@ ForEach( $ddc in $ddcs )
 
             if( $remoteInfo -and $remoteInfo.LastBootupTime -lt $lastRebootedThreshold )
             {
-                [pscustomobject]@{ 'Machine' = $machineName ; 'Last Rebooted' = $remoteInfo.LastBootupTime ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount }
+                [pscustomobject]@{ 'Machine' = $machineName ; 'Last Rebooted' = $remoteInfo.LastBootupTime ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' }
             }
             elseif( ! $remoteInfo )
             {
                 Write-Warning "Failed to get boot time for $machineName"
-                $null = $failedToGetBootTime.Add( [pscustomobject]@{ 'Machine' = $machineName ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount } )
+                $null = $failedToGetBootTime.Add( [pscustomobject]@{ 'Machine' = $machineName ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' } )
             }
         }
         Write-Verbose "Fatest remote job was $fastestRemoteJob seconds, slowest $slowestRemoteJob seconds"
@@ -404,17 +409,23 @@ ForEach( $ddc in $ddcs )
     if( $XenAppDeliveryGroups -and $XenAppDeliveryGroups.Count )
     {
         [array]$highestUserCounts = @( $machines | Sort SessionCount -Descending | Select -First $topCount -Property @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},SessionCount,DesktopGroupName,@{n='Tags';e={$_.Tags -join ', '}} )
-        $highestUsedMachines += $highestUserCounts
         if( $highestUserCounts.Count )
         {
+            $highestUsedMachines += $highestUserCounts
             $body += "`tHighest number of concurrent users is $($highestUserCounts[0].SessionCount) on $($highestUserCounts[0].'Machine Name')`n"
+        }
+        [array]$highestLoadIndices = @( $machines | Sort LoadIndex -Descending | Select -First $topCount -Property @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},SessionCount,LoadIndex,@{n='Load Indexes';e={$_.LoadIndexes -join ','}},DesktopGroupName,@{n='Tags';e={$_.Tags -join ', '}} )
+        if( $highestLoadIndices.Count )
+        {
+            $highestLoadIndexes += $highestLoadIndices
+            $body += "`tHighest load index is $($highestLoadIndices[0].LoadIndex) on $($highestLoadIndices[0].'Machine Name') with $($highestLoadIndices[0].SessionCount) sessions`n"
         }
     }
     
     $sites += Get-BrokerSite -AdminAddress $ddc | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv
 }
 
-if( $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) )
+if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) )
 {
     if( $recipients.Count -eq 1 -and $recipients[0].IndexOf(',') -ge 0 )
     {
@@ -471,6 +482,10 @@ if( $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) )
     if( $highestUsedMachines -and $highestUsedMachines.Count -gt 0 )
     {
         $htmlBody += $highestUsedMachines | sort SessionCount -Descending| ConvertTo-Html -Fragment -PreContent "<h2>$($highestUsedMachines.Count) machines with highest number of users<h2>" | Out-String
+    }
+    if( $highestLoadIndexes -and $highestLoadIndexes.Count -gt 0 )
+    {
+        $htmlBody += $highestLoadIndexes | sort LoadIndex -Descending| ConvertTo-Html -Fragment -PreContent "<h2>$($highestLoadIndexes.Count) machines with highest load indexes<h2>" | Out-String
     }
     if( $failedToGetBootTime -and $failedToGetBootTime.Count )
     {
