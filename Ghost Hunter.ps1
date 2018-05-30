@@ -7,6 +7,8 @@
     Modification History:
 
     29/05/18  GL  Added help and remoting of Citrix cmdlets if not available locally
+
+    30/05/18  GL  Added error checking for quser so does not report as ghost if error returned
 #>
 
 <#
@@ -132,12 +134,12 @@ if( ( Get-Command -Name Get-BrokerSession -ErrorAction SilentlyContinue ) -eq $n
 [int]$count = 0
 
 [hashtable]$sessions = @{}
-
 [datetime]$startTime = Get-Date
 
 [array]$results = @( Get-BrokerSession -AdminAddress $ddc -MaxRecordCount $maxRecordCount -SessionState Disconnected | ForEach-Object `
 { 
     $session = $_
+    [bool]$gotQuserError = $false
     [string]$domainname,$username = $session.UserName -split '\\'
     if( [string]::IsNullOrEmpty( $username ) )
     {
@@ -171,31 +173,40 @@ if( ( Get-Command -Name Get-BrokerSession -ErrorAction SilentlyContinue ) -eq $n
             ## Output of quser is fixed width but can't do simple parse as SESSIONNAME is empty when session is disconnected so we break it up based on header positions
             [string[]]$fieldNames = @( 'USERNAME','SESSIONNAME','ID','STATE','IDLE TIME','LOGON TIME' )
             [string[]]$allOutput = $process.StandardOutput.ReadToEnd() -split "`n"
+            [string]$errorOutput = $process.StandardError.ReadToEnd()
             [string]$header = $allOutput[0]
-            $serverSessions = @( $allOutput | Select -Skip 1 | ForEach-Object `
+            if( ! [string]::IsNullOrEmpty( $errorOutput ) -and $errorOutput.IndexOf( 'Error' ) -ge 0 )
             {
-                [string]$line = $_
-                if( ! [string]::IsNullOrEmpty( $line ) )
+                Write-Warning "Got error from quser on $($session.HostedMachineName) so cannot tell if ghost session or not: $errorOutput"
+                $gotQuserError = $true
+            }
+            else
+            {
+                $serverSessions = @( $allOutput | Select -Skip 1 | ForEach-Object `
                 {
-                    $result = New-Object -TypeName PSCustomObject
-                    For( [int]$index = 0 ; $index -lt $fieldNames.Count ; $index++ )
+                    [string]$line = $_
+                    if( ! [string]::IsNullOrEmpty( $line ) )
                     {
-                        [int]$startColumn = $header.IndexOf($fieldNames[$index])
-                        ## if last column then can't look at start of next field so use overall line length
-                        [int]$endColumn = if( $index -eq $fieldNames.Count - 1 ) { $line.Length } else { $header.IndexOf( $fieldNames[ $index + 1 ] ) }
-                        try
+                        $result = New-Object -TypeName PSCustomObject
+                        For( [int]$index = 0 ; $index -lt $fieldNames.Count ; $index++ )
                         {
-                            Add-Member -InputObject $result -MemberType NoteProperty -Name $fieldNames[ $index ] -Value ( $line.Substring( $startColumn , $endColumn - $startColumn ).Trim() )
+                            [int]$startColumn = $header.IndexOf($fieldNames[$index])
+                            ## if last column then can't look at start of next field so use overall line length
+                            [int]$endColumn = if( $index -eq $fieldNames.Count - 1 ) { $line.Length } else { $header.IndexOf( $fieldNames[ $index + 1 ] ) }
+                            try
+                            {
+                                Add-Member -InputObject $result -MemberType NoteProperty -Name $fieldNames[ $index ] -Value ( $line.Substring( $startColumn , $endColumn - $startColumn ).Trim() )
+                            }
+                            catch
+                            {
+                                throw $_
+                            }
                         }
-                        catch
-                        {
-                            throw $_
-                        }
-                    }
-                    $result
-                }      
-            }) 
-            $sessions.Add( $session.HostedMachineName , $serverSessions )
+                        $result
+                    }      
+                }) 
+                $sessions.Add( $session.HostedMachineName , $serverSessions )
+            }
         }
         $usersActualSession = $null
         if( $serverSessions )
@@ -209,7 +220,7 @@ if( ( Get-Command -Name Get-BrokerSession -ErrorAction SilentlyContinue ) -eq $n
                 }
             }
         }
-        if( ! $usersActualSession )
+        if( ! $usersActualSession -and ! $gotQuserError )
         {
             $otherSessions = @( Get-BrokerSession -AdminAddress ywcxp2003 -UserName "$domainname\$UserName" | ?{ $_.SessionKey -ne $session.SessionKey } )
             Add-Member -InputObject $session -MemberType NoteProperty -Name OtherSessions -Value ( ( $otherSessions | Select -ExpandProperty HostedMachineName ) -join ',' )
