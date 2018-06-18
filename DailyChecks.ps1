@@ -21,6 +21,10 @@
     27/05/18  GL   Added tags to overdue reboot 
 
     30/05/18  GL   Added LoadIndex and LoadIndexes columns
+
+    31/05/18  GL   Filter highest LoadIndex machines where not in maintenance mode
+
+    08/06/18  GL   Added VMware support for use where machines aren't power managed by Citrix
 #>
 
 <#
@@ -41,6 +45,10 @@ Only specify one DDC if you have more than one but they share the same SQL datab
 
 Comma separated list of Provisioning Services servers to extract information from although the cmdlets must be available from where the script runs from, e.g. where the PVS console is installed
 Only specify one PVS server if you have more than one but they share the same SQL database
+
+.PARAMETER vCentres
+
+Comma separated list of VMware vCentres to connect to. Use this if VMs in Citrix are not power managed
 
 .PARAMETER UNCs
 
@@ -126,6 +134,7 @@ Param
     [string[]]$ddcs = @( $env:Computername ) ,
     [string[]]$pvss = @( ) ,
     [string[]]$UNCs = @() ,
+    [string[]]$vCentres = @() ,
     [string]$mailserver ,
     [string]$proxyMailServer = 'localhost' ,
     [string]$from = "$env:Computername@$env:userdnsdomain" ,
@@ -141,7 +150,8 @@ Param
     [int]$maxRecords = 2000 ,
     [int]$jobTimeout = 30 ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
-    [string[]]$modules = @( "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , "Guys.Common.Functions.psm1" )
+    [string[]]$modules = @( "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , "Guys.Common.Functions.psm1" ) ,
+    [string]$vmwareModule = 'VMware.VimAutomation.Core'
 )
 
 if( ! [string]::IsNullOrEmpty( $logfile ) )
@@ -230,6 +240,26 @@ if( $excludedTags -and $excludedTags.Count -eq 1 -and $excludedTags[0].IndexOf('
     $excludedTags = $excludedTags[0] -split ','
 }
 
+if( $vCentres -and $vCentres.Count -eq 1 -and $vCentres[0].IndexOf(',') -ge 0 )
+{
+    $vCentres = $vCentres[0] -split ','
+}
+
+$vic = $null
+if( $vCentres -and $vCentres.Count -gt 0 )
+{
+    Import-Module $vmwareModule -ErrorAction Stop
+
+    ## Disable certificate warnings
+    $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
+	$vic = Connect-VIServer -Server $vCentres 
+
+	if( ! $? -or ! $vic )
+	{
+  	  exit
+	}
+}
+
 $fileShares = ForEach( $UNC in $UNCs )
 {
     [uint64]$userFreeSpace = 0
@@ -307,40 +337,70 @@ ForEach( $ddc in $ddcs )
         }
     }
 
+    <#
     $poweredOnUnregistered += @( $machines | Where-Object { $_.PowerState -eq 'On' -and $_.RegistrationState -eq 'Unregistered' -and ! $_.InMaintenanceMode } | Select MachineName,DesktopGroupName,CatalogName,SessionCount)
     
     $notPoweredOn += @( $machines | Where-Object { $_.PowerState -eq 'Off' } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
-
+    #>
+    
+    ## add VMware VM details for each machine from Citrix in a hash table on the unqualified name so we can look up efficiently when enumerating over machines from Citrix
+    [hashtable]$vmwareMachines = @{}
+    if( $vic )
+    {
+        $machines | ForEach-Object `
+        {
+            $name = ($_.MachineName -split '\\')[-1]
+            $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+            if( ! $vm )
+            {
+                $vm = Get-VM -Name ($name + '*') ## lest it isn't actually named as per the NetBIOS name. Slightly risk, perhaps define character after name as parameter like _
+            }
+            if( $vm )
+            {
+                $vmwareMachines.Add( $name , $vm )
+            }
+            else
+            {
+                Write-Warning "Failed to find VM $name"
+            }
+        }
+    }
+    $poweredOnUnregistered += @( $machines | Where-Object { $(if( $vic ) { $vmwareMachines[ ($_.MachineName -split '\\')[-1] ].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On' } ) -and $_.RegistrationState -eq 'Unregistered' -and ! $_.InMaintenanceMode } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
+    
+    $notPoweredOn += @( $machines | Where-Object { $(if( $vic ) { $vmwareMachines[ ($_.MachineName -split '\\')[-1] ].PowerState -eq 'PoweredOff' } else { $_.PowerState -eq 'Off'  } ) } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
+   
     $possiblyOverdueReboot += if( $lastRebootedDaysAgo )
     {
         [decimal]$slowestRemoteJob = 0
         [decimal]$fastestRemoteJob = [int]::MaxValue
         [datetime]$lastRebootedThreshold = (Get-Date).AddDays( -$lastRebootedDaysAgo )
 
-        ForEach( $machine in $($machines | Where-Object { $_.PowerState -eq 'On' } ) )
+        $machines | Where-Object { if( $vic ) { $vmwareMachines[($_.MachineName -split '\\')[-1]].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }} | ForEach-Object `
         {
+            $machine = $_
             [string]$machineName = ($machine.MachineName -split '\\')[-1]
             Write-Verbose "Checking if last reboot of $machineName was before $lastRebootedThreshold"
             [scriptblock]$work = 
             {
-                Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+                ## don't use CIM as may not have PowerShell v3.0
+                [Management.ManagementDateTimeConverter]::ToDateTime( ( Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue | Select -ExpandProperty LastBootUpTime ) )
             }
             
             $timer = [Diagnostics.Stopwatch]::StartNew()
             ## This function has a timeout as some remote commands can take a long time to timeout which massively slows the script
 
-            $remoteInfo = Get-RemoteInfo -computer $machineName -jobTimeout $jobTimeout -work $work
+            $lastBootTime = Get-RemoteInfo -computer $machineName -jobTimeout $jobTimeout -work $work
 
             $timer.Stop()
             Write-Verbose "Remote call to $machineName took $($timer.Elapsed.TotalSeconds) seconds"
             $fastestRemoteJob = [math]::Min( $fastestRemoteJob , $timer.Elapsed.TotalSeconds )
             $slowestRemoteJob = [math]::Max( $slowestRemoteJob , $timer.Elapsed.TotalSeconds )
 
-            if( $remoteInfo -and $remoteInfo.LastBootupTime -lt $lastRebootedThreshold )
+            if( $lastBootTime -and [datetime]$lastBootTime -lt $lastRebootedThreshold )
             {
-                [pscustomobject]@{ 'Machine' = $machineName ; 'Last Rebooted' = $remoteInfo.LastBootupTime ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' }
+                [pscustomobject]@{ 'Machine' = $machineName ; 'Last Rebooted' = $lastBootTime ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' }
             }
-            elseif( ! $remoteInfo )
+            elseif( ! $lastBootTime )
             {
                 Write-Warning "Failed to get boot time for $machineName"
                 $null = $failedToGetBootTime.Add( [pscustomobject]@{ 'Machine' = $machineName ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' } )
@@ -348,8 +408,9 @@ ForEach( $ddc in $ddcs )
         }
         Write-Verbose "Fatest remote job was $fastestRemoteJob seconds, slowest $slowestRemoteJob seconds"
     }
-    
-    [int]$inMaintenanceModeAndOn = $machines | Where-Object { $_.InMaintenanceMode -eq $true -and $_.PowerState -eq 'On' } | Measure-Object | Select -ExpandProperty Count
+        
+    [int]$inMaintenanceModeAndOn = $machines | Where-Object { $_.InMaintenanceMode -eq $true -and $(if( $vic ) { $vmwareMachines[($_.MachineName -split '\\')[-1]].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }) } | Measure-Object | Select -ExpandProperty Count
+
     $body += "`t$inMaintenanceModeAndOn powered on machines are in maintenance mode ($([math]::round(( $inMaintenanceModeAndOn / $machines.Count) * 100))%)`n"
     $body += "`t$registeredMachines machines are registered ($([math]::round(( $registeredMachines / $machines.Count) * 100))%)`n"
     $body += "`t$($notPoweredOn.Count) machines are not powered on ($([math]::round(( $notPoweredOn.Count / $machines.Count) * 100))%)`n"
@@ -414,7 +475,7 @@ ForEach( $ddc in $ddcs )
             $highestUsedMachines += $highestUserCounts
             $body += "`tHighest number of concurrent users is $($highestUserCounts[0].SessionCount) on $($highestUserCounts[0].'Machine Name')`n"
         }
-        [array]$highestLoadIndices = @( $machines | Sort LoadIndex -Descending | Select -First $topCount -Property @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},SessionCount,LoadIndex,@{n='Load Indexes';e={$_.LoadIndexes -join ','}},DesktopGroupName,@{n='Tags';e={$_.Tags -join ', '}} )
+        [array]$highestLoadIndices = @( $machines | Where-Object { $_.InMaintenanceMode -eq $false } | Sort LoadIndex -Descending | Select -First $topCount -Property @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},SessionCount,LoadIndex,@{n='Load Indexes';e={$_.LoadIndexes -join ','}},DesktopGroupName,@{n='Tags';e={$_.Tags -join ', '}} )
         if( $highestLoadIndices.Count )
         {
             $highestLoadIndexes += $highestLoadIndices
@@ -485,7 +546,7 @@ if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserv
     }
     if( $highestLoadIndexes -and $highestLoadIndexes.Count -gt 0 )
     {
-        $htmlBody += $highestLoadIndexes | sort LoadIndex -Descending| ConvertTo-Html -Fragment -PreContent "<h2>$($highestLoadIndexes.Count) machines with highest load indexes<h2>" | Out-String
+        $htmlBody += $highestLoadIndexes | sort LoadIndex -Descending| ConvertTo-Html -Fragment -PreContent "<h2>$($highestLoadIndexes.Count) machines with highest load indexes (not in maintenance mode)<h2>" | Out-String
     }
     if( $failedToGetBootTime -and $failedToGetBootTime.Count )
     {
@@ -591,6 +652,11 @@ if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserv
     $htmlBody = ConvertTo-Html -PostContent $htmlBody -Head $style
 
     Invoke-Command -ComputerName $proxyMailServer -ScriptBlock { Send-MailMessage -Subject $using:subject -BodyAsHtml -Body $using:htmlBody -From $using:from -To $using:recipients -SmtpServer $using:mailserver }
+}
+
+if( $vic )
+{
+    Disconnect-VIServer -Server $vCentres -Confirm:$false
 }
 
 if( ! [string]::IsNullOrEmpty( $logfile ) )
