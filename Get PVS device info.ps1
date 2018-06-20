@@ -55,6 +55,12 @@
                     Added remote domain health check via Test-ComputerSecureChannel and AD account modification time
 
     30/05/18    GL  Added Load indexes
+
+    01/06/18    GL  Changed to run device queries in runspaces to speed up
+
+    19/06/18    GL  Split main code into module so can re-use in other scripts
+
+    20/06/18    GL  Added option to split VMware VM names in case have description, etc after an _ character or similar
 #>
 
 <#
@@ -166,9 +172,9 @@ Caption of the message to send to users in the action GUI. If none specified and
 
 Timeout in seconds for PVS power commands
 
-.PARAMETER profileCode
+.PARAMETER splitVM
 
-Output timings at various points to aid in finding slow parts
+Split VMware name on a specific character such as an underscore where the second and subsequent parts of the name are descriptions, etc
 
 .PARAMETER help
 
@@ -222,7 +228,7 @@ Param
     [switch]$noMenu ,
     [switch]$noOrphans ,
     [switch]$noGridView ,
-    [ValidateSet('PVS','MCS','Manual')]
+    [ValidateSet('PVS','MCS','Manual','Any')]
     [string]$provisioningType = 'PVS' ,
     [string]$configRegKey = 'HKCU:\software\Guy Leech\PVS Fetcher' ,
     [string]$messageText ,
@@ -230,12 +236,14 @@ Param
     [int]$maxRecordCount = 2000 ,
     [int]$jobTimeout = 120 ,
     [int]$timeout = 60 ,
-    [switch]$profileCode ,
     [int]$cpuSamples = 2 ,
+    [int]$maxThreads = 10 ,
     [string]$pvsShare ,
+    [string]$splitVM ,
     [switch]$help ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
-    [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" ,'VMware.VimAutomation.Core'  ) 
+    [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , 'Guys.Common.Functions.psm1' ) ,
+    [string]$vmWareModule = 'VMware.VimAutomation.Core'
 )
 
 if( $help )
@@ -283,39 +291,21 @@ if( $snapins -and $snapins.Count -gt 0 )
     }
 }
 
-if( $modules -and $modules.Count -gt 0 )
-{
-    ForEach( $module in $modules )
+ForEach( $module in $modules )
+{   
+    Import-Module $module -ErrorAction SilentlyContinue
+    [bool]$loaded = $?
+    if( ! $loaded -and $module -notmatch '^[a-z]:\\' -and  $module -notmatch '^\\\\' ) ## only check script folder if not an absolute or UNC path
     {
-        Import-Module $module -ErrorAction Continue
+        ## try same folder as the script if there is no path in the module name
+        Import-Module (Join-Path ( & { Split-Path -Path $myInvocation.ScriptName -Parent } ) $module ) -ErrorAction Continue
+        $loaded = $?
+    }
+    if( ! $loaded )
+    {
+        Write-Warning "Unable to load module `"$module`" so functionality may be limited"
     }
 }
-
-[string[]]$cacheTypes = 
-@(
-    'Standard Image' ,
-    'Cache on Server', 
-    'Standard Image' ,
-    'Cache in Device RAM', 
-    'Cache on Device Hard Disk', 
-    'Standard Image' ,
-    'Device RAM Disk', 
-    'Cache on Server, Persistent',
-    'Standard Image' ,
-    'Cache in Device RAM with Overflow on Hard Disk' 
-)
-
-[string[]]$accessTypes = 
-@(
-    'Production', 
-    'Maintenance', 
-    'Maintenance Highest Version', 
-    'Override', 
-    'Merge', 
-    'MergeMaintenance', 
-    'MergeTest'
-    'Test'
-)
 
 $messageWindowXAML = @"
 <Window x:Class="Direct2Events.MessageWindow"
@@ -436,14 +426,6 @@ Add-Type -TypeDefinition @'
       IDTRYAGAIN = 10
    }
 '@
-
-Function Show-Profiling( [string]$info , [int]$lineNumber , $timer , [bool]$profileCode )
-{
-    if( $profileCode )
-    {
-        "{0}:{1}:{2}" -f $timer.ElapsedMilliSeconds , $lineNumber , $info
-    }
-}
 
 Function Save-ConfigToRegistry( [string]$serverSet = 'Default' , [string[]]$DDCs , [string[]]$PVSServers , [string[]]$hypervisors )
 {
@@ -672,46 +654,8 @@ Function Perform-Action( [string]$action , $form )
     Display-MessageBox -window $thisWindow -text "$errors / $($WPFlstMachines.SelectedItems.Count) errors" -caption "Finished $action" -buttons OK -icon $status
 }
 
-Function Get-CurrentLineNumber
-{ 
-    $MyInvocation.ScriptLineNumber 
-}
-
-Function Get-ADMachineInfo
-{
-    Param
-    (
-        [string]$name ,
-        [hashtable]$adparams ,
-        [string]$adGroups ,
-        $item
-    )
-    
-    if( $item -and ( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) )
-    {
-        try
-        {
-            Show-Profiling -Info "Getting AD group info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            $adaccount = Get-ADComputer $item.Name -ErrorAction SilentlyContinue @adparams
-            [string]$groups = $null
-            if( ! [string]::IsNullOrEmpty( $ADgroups ) )
-            {
-               $groups = ( ( $adAccount | select -ExpandProperty MemberOf | ForEach-Object { (( $_ -split '^CN=')[1] -split '\,')[0] } | Where-Object { $_ -match $ADgroups } ) -join ' ' )
-            }
-            Add-Member -InputObject $item -NotePropertyMembers `
-            @{
-                'AD Account Created' = $adAccount.Created
-                'AD Last Logon' = $adAccount.LastLogonDate
-                'AD Account Modified' = $adaccount.Modified
-                'AD Description' = $adAccount.Description
-                'AD Groups' = $groups
-            }
-        }
-        catch {}
-    }
-}
-
-Function Get-RemoteInfo( [string]$computer , [int]$cpuSamples )
+<#
+Function Get-RemoteInfo( [string]$computer , [int]$cpuSamples , [int]$jobTimeout )
 {
     [hashtable]$results = @{}
 
@@ -784,6 +728,7 @@ Function Get-RemoteInfo( [string]$computer , [int]$cpuSamples )
     }
     $results
 }
+#>
 
 if( $noProgress )
 {
@@ -803,32 +748,16 @@ elseif( $save )
 {
     Save-ConfigToRegistry -serverSet $serverSet  -DDCs $ddcs -PVSServers $pvsServers -hypervisors $hypervisors
 }
-
-[datetime]$startTime = Get-Date
-
-Write-Progress -Activity "Caching information" -PercentComplete 0
-
-## Get all information from DDCs so we can lookup locally
-[hashtable]$machines = @{}
-
-ForEach( $ddc in $ddcs )
-{
-    $machines.Add( $ddc , [System.Collections.ArrayList] ( Get-BrokerMachine -AdminAddress $ddc -MaxRecordCount $maxRecordCount -ErrorAction SilentlyContinue ) )
-}
-
-## Make a hashtable so we can index quicker when cross referencing to DDC & VMware
-[hashtable]$devices = @{}
-#$devices = New-Object -TypeName System.Collections.ArrayList
-
-[hashtable]$vms = @{}
-
+  
 if( $hypervisors -and $hypervisors.Count )
 {
     if( [string]::IsNullOrEmpty( $name ) )
     {
         Write-Error "Must specify a VM name pattern via -name when cross referencing to VMware"
-        return
+        exit
     }
+
+    Import-Module $vmWareModule -ErrorAction Stop
 
     Write-Progress -Activity "Connecting to hypervisors $($hypervisors -split ' ')" -PercentComplete 1
 
@@ -840,13 +769,13 @@ if( $hypervisors -and $hypervisors.Count )
         $null = $columns.Add( 'Hard Drives (GB)')
         $null = $columns.Add( 'NICs')
         $null = $columns.Add( 'Hypervisor')
-
-        ## Cache all VMs for efficiency
-        Get-VM | Where-Object { $_.Name -match $name } | ForEach-Object `
-        {
-            $vms.Add( $_.Name , $_ )
-        }
-        Write-Verbose "Got $($vms.Count) vms matching `"$name`" from $($hypervisors -split ' ')"
+        ## we pass the modules list to our function so that they can be loaded into the runspaces
+        $modules += $vmWareModule
+    }
+    else
+    {
+        Write-Error "Failed to connect to vmware $($hypervisors -join ' ')"
+        exit
     }
 }
 
@@ -855,420 +784,10 @@ if( $PSVersionTable.PSVersion.Major -lt 5 -and $columns.Count -gt 30 -and [strin
     Write-Warning "This version of PowerShell limits the number of columns in a grid view to 30 and we have $($columns.Count) so those from `"$($columns[30])`" will be lost in grid view"
 }
 
-[int]$pvsServerCount = 0
+[datetime]$startTime = Get-Date
 
-[hashtable]$adparams = @{ 'Properties' = @( 'Created' , 'LastLogonDate' , 'Description' , 'Modified' )  }
-if( ! [string]::IsNullOrEmpty( $ADgroups ) )
-{
-    $adparams[ 'Properties' ] +=  'MemberOf' 
-}
-
-if( $profileCode )
-{
-    $profiler = [Diagnostics.Stopwatch]::new()
-}
-else
-{
-    $profiler = $null
-}
-
-ForEach( $pvsServer in $pvsServers )
-{
-    $pvsServerCount++
-    Set-PvsConnection -Server $pvsServer 
-
-    if( ! $? )
-    {
-        Write-Output "Cannot connect to PVS server $pvsServer - aborting"
-        continue
-    }
-
-    ## Cache latest production version for vdisks so don't look up for every device
-    [hashtable]$diskVersions = @{}
-
-    ## Get Device info in one go as quite slow
-    [hashtable]$deviceInfos = @{}
-    Get-PvsDeviceInfo | ForEach-Object `
-    {
-        $deviceInfos.Add( $_.DeviceId , $_ )
-    }
-
-    ## Cache store locations so we can look up vdisk sizes
-    [hashtable]$stores = @{}
-    Get-PvsStore | ForEach-Object `
-    {
-        $stores.Add( $_.StoreName , $_.Path )
-    }
-
-    ## Get all devices so we can do progress
-    $pvsDevices = @( Get-PvsDevice | Where-Object { $_.Name -match $name })
-    [decimal]$eachDevicePercent = 100 / [Math]::Max( $pvsDevices.Count , 1 ) ## avoid divide by zero if no devices found
-    [int]$counter = 0
-
-    # Get all sites that we can see on this server and find all devices and cross ref to Citrix for catalogues and delivery groups
-    $pvsDevices | ForEach-Object `
-    {
-        if( $profileCode )
-        {
-            $profiler.Restart()
-        }
-        $counter++
-        $device = $_
-        [decimal]$percentComplete = $counter * $eachDevicePercent
-        Write-Progress -Activity "Processing $($pvsDevices.Count) devices from PVS server $pvsServer" -Status "$($device.name)" -PercentComplete $percentComplete
-
-        [int]$bootVersion = -1
-        $vDisk = Get-PvsDiskInfo -DeviceId $_.DeviceId
-        [hashtable]$fields = @{}
-
-        Show-Profiling -Info "Got disk Info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-        if( $vms -and $vms.count )
-        {
-            Show-Profiling -Info "Getting VMware info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            $vm = $vms[ $device.Name ]
-            if( $vm )
-            {
-                $fields += @{
-                    'CPUs' = $vm.NumCpu 
-                    'Memory (GB)' = $vm.MemoryGB
-                    'Hard Drives (GB)' = $( ( Get-HardDisk -VM $vm -ErrorAction SilentlyContinue | sort CapacityGB | select -ExpandProperty CapacityGB ) -join ' ' )
-                    'NICS' = $( ( Get-NetworkAdapter -VM $vm -ErrorAction SilentlyContinue | Sort Type | Select -ExpandProperty Type ) -join ' ' )
-                    'Hypervisor' = $vm.VMHost
-                }
-            }
-        }
-        
-        if( $device.Active -and ! $noRemoting )
-        {
-            Show-Profiling -Info "Getting remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            $remoteInfo = Get-RemoteInfo -computer $device.Name -cpuSamples $cpuSamples
-            if( $remoteInfo -and $remoteInfo.Count )
-            {
-                $fields += $remoteInfo
-            }
-            Show-Profiling -Info "Got remote info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-        }
-
-        $fields.Add( 'PVS Server' , $pvsServer )
-        $versions = $null
-        if( $vdisk )
-        {
-            $fields += @{
-                'Disk Name' = $vdisk.Name
-                'Store Name' = $vdisk.StoreName
-                'Disk Description' = $vdisk.Description
-                'Cache Type' = $cacheTypes[$vdisk.WriteCacheType]
-                'Disk Size (GB)' = ([math]::Round( $vdisk.DiskSize / 1GB , 2 ))
-                'Write Cache Size (MB)' = $vdisk.WriteCacheSize }
-            ## Cache vdisk version info to reduce PVS server hits
-            $versions = $diskVersions[ $vdisk.DiskLocatorId ]
-            if( ! $versions )
-            { 
-                try
-                {
-                    Show-Profiling -Info "Getting disk version info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-                    ## Can't pre-cache since can only retrieve per disk
-                    $versions = Get-PvsDiskVersion -DiskLocatorId $vdisk.DiskLocatorId 
-                    $diskVersions.Add( $vdisk.DiskLocatorId , $versions )
-                }
-                catch
-                {
-                }
-            }
-            if( $versions )
-            {
-                ## Now get latest production version of this vdisk
-                $override = $versions | Where-Object { $_.Access -eq 3 } 
-                $vdiskFile = $null
-                $latestProduction = $versions | Where-Object { $_.Access -eq 0 } | Sort Version -Descending | Select -First 1 
-                if( $latestProduction )
-                {
-                    $vdiskFile = $latestProduction.DiskFileName
-                    $latestProductionVersion = $latestProduction.Version
-                }
-                else
-                {
-                    $latestProductionVersion = $null
-                }
-                if( $override )
-                {
-                    $bootVersion = $override.Version
-                    $vdiskFile = $override.DiskFileName
-                }
-                else
-                {
-                    ## Access: Read-only access of the Disk Version. Values are: 0 (Production), 1 (Maintenance), 2 (MaintenanceHighestVersion), 3 (Override), 4 (Merge), 5 (MergeMaintenance), 6 (MergeTest), and 7 (Test) Min=0, Max=7, Default=0
-                    $bootVersion = $latestProductionVersion
-                }
-                if( $vdiskFile)
-                {
-                    ## Need to see if Store path is local to the PVS server and if so convert to a share so we can get vdisk file info
-                    if( $stores[ $vdisk.StoreName ] -match '^([A-z]):(.*$)' )
-                    {
-                        if( [string]::IsNullOrEmpty( $pvsShare ) )
-                        {
-                            $vdiskfile = Join-Path ( Join-Path ( '\\' + $pvsServer + '\' + "$($Matches[1])`$"  ) $Matches[2] ) $vdiskFile ## assume regular admin share
-                        }
-                        else
-                        {
-                            $vdiskfile = Join-Path ( Join-Path ( '\\' + $pvsServer + '\' + $pvsShare ) ) $vdiskFile
-                        }
-                    }
-                    else
-                    {
-                        $vdiskFile = Join-Path $stores[ $vdisk.StoreName ] $vdiskFile
-                    }
-                    if( ( Test-Path $vdiskFile -ErrorAction SilentlyContinue ) )
-                    {
-                        $fields += @{ 'vDisk Size (GB)' = [math]::Round( (Get-ItemProperty -Path $vdiskFile).Length / 1GB ) }
-                    }
-                    else
-                    {
-                        Write-Warning "Could not find disk `"$vdiskFile`" for $($device.name)"
-                    }
-                }
-                if( $latestProductionVersion -eq $null -and $override )
-                {
-                    ## No production version, only an override so this must be the latest production version
-                    $latestProductionVersion = $override.Version
-                }
-                $fields += @{
-                    'Override Version' = $( if( $override ) { $bootVersion } else { $null } ) 
-                    'Vdisk Latest Version' = $latestProductionVersion 
-                    'Latest Version Description' = $( $versions | Where-Object { $_.Version -eq $latestProductionVersion } | Select -ExpandProperty Description )  
-                }      
-            }
-            $fields.Add( 'Vdisk Production Version' ,$bootVersion )
-        }
-        
-        Show-Profiling -Info "Getting device info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-        $deviceInfo = $deviceInfos[ $device.DeviceId ]
-        if( $deviceInfo )
-        {
-            $fields.Add( 'Disk Version Access' , $accessTypes[ $deviceInfo.DiskVersionAccess ] )
-            $fields.Add( 'Booted Off' , $deviceInfo.ServerName )
-            $fields.Add( 'Device IP' , $deviceInfo.IP )
-            if( ! [string]::IsNullOrEmpty( $deviceInfo.Status ) )
-            {
-                $fields.Add( 'Retries' , ($deviceInfo.Status -split ',')[0] -as [int] ) ## second value is supposedly RAM cache used percent but I've not seen it set
-            }
-            if( $device.Active )
-            {
-                ## Check if booting off the disk we should be as previous info is what is assigned, not what is necessarily being used (e.g. vdisk changed for device whilst it is booted)
-                $bootedDiskName = (( $diskVersions[ $deviceInfo.DiskLocatorId ] | Select -First 1 | Select -ExpandProperty Name ) -split '\.')[0]
-                $fields.Add( 'Booted Disk Version' , $deviceInfo.DiskVersion )
-                if( $bootVersion -ge 0 )
-                {
-                    Write-Verbose "$($device.Name) booted off $bootedDiskName, disk configured $($vDisk.Name)"
-                    $fields.Add( 'Booted off latest' , ( $bootVersion -eq $deviceInfo.DiskVersion -and $bootedDiskName -eq $vdisk.Name ) )
-                    $fields.Add( 'Booted off vdisk' , $bootedDiskName )
-                }
-            }
-            if( $versions )
-            {
-                try
-                {
-                    $fields.Add( 'Disk Version Created' ,( $versions | Where-Object { $_.Version -eq $deviceInfo.DiskVersion } | select -ExpandProperty CreateDate ) )
-                }
-                catch
-                {
-                    $_
-                }
-            }
-        }
-        else
-        {
-            Write-Warning "Failed to get PVS device info for id $($device.DeviceId) $($device.Name)"
-        }
-        
-        Get-ADMachineInfo -name $device.Name -adparams $adparams -adGroups $ADgroups -item $device
-
-        if( $device.Active -and $dns )
-        {
-            Show-Profiling -Info "Resolving DNS name" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            [array]$ipv4Address = @( Resolve-DnsName -Name $device.Name -Type A )
-            $fields.Add( 'IPv4 address' , ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' ) )
-        }
-        
-        Show-Profiling -Info "Getting DDC info" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-        if( ( Get-Command -Name Get-BrokerMachine -ErrorAction SilentlyContinue ) )
-        {
-            ## Need to find a ddc that will return us information on this device
-            ForEach( $ddc in $ddcs )
-            {
-                ## can't use HostedMachineName as only populated if registered
-                $machine = $machines[ $ddc ] | Where-Object { $_.MachineName -eq  ( ($device.DomainName -split '\.')[0] + '\' + $device.Name ) }
-                if( $machine )
-                {
-                    $fields += @{
-                        'Machine Catalogue' = $machine.CatalogName
-                        'Delivery Group' = $machine.DesktopGroupName
-                        'Registration State' = $machine.RegistrationState
-                        'User_Sessions' = $machine.SessionCount
-                        'Load Index' = $machine.LoadIndex
-                        'Load Indexes' = $machine.LoadIndexes -join ','
-                        'Maintenance_Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
-                        'DDC' = $ddc
-                    }
-                    if( $tags )
-                    {
-                        $fields.Add( 'Tags' , ( $machine.Tags -join ',' ) )
-                    }
-                    break
-                }
-            }
-        }
-        Add-Member -InputObject $device -NotePropertyMembers $fields
-        try
-        {
-            $devices.Add( $device.Name , $device )
-        }
-        catch
-        {
-            Write-Warning "Duplicate device name $($device.Name) found"
-        }
-        if( $profileCode )
-        {
-            Show-Profiling -Info "End of loop" -lineNumber (Get-CurrentLineNumber) -timer $profiler -profileCode $profileCode
-            $profiler.Stop()
-        }
-    } 
-}
-
-## See if we have any devices from DDC machine list which are marked as being in PVS catalogues but not in our devices list so are orphans
-if( ! $noOrphans )
-{
-    $machines.GetEnumerator() | ForEach-Object `
-    {
-        $ddc = $_.Key
-        Write-Progress -Activity "Checking for orphans on DDC $ddc" -PercentComplete 98
-
-        ## Cache machine catalogues so we can check provisioning type
-        [hashtable]$catalogues = @{}
-        Get-BrokerCatalog -AdminAddress $ddc | ForEach-Object { $catalogues.Add( $_.Name , $_ ) }
-
-        ## Add to devices so we can display as much detail as possible if PVS provisioned
-        $_.Value | ForEach-Object `
-        {
-            $machine = $_
-            $domainName,$machineName = $machine.MachineName -split '\\'
-            if( [string]::IsNullOrEmpty( $machineName ) )
-            {
-                $machineName = $domainName
-                $domainName = $null
-            }
-            if( [string]::IsNullOrEmpty( $name ) -or $machineName -match $name )
-            {
-                ## Now see if have this in devices in which case we ignore it - domain name in device record may be FQDN but domain from catalogue will not be (may also be missing in device)
-                #$device = $devices | Where-Object { $_.Name -eq $machineName -and ( ! $domainName -or ! $_.DomainName -or ( $domainName -eq ( $_.DomainName -split '\.' )[0] ) ) }
-                $device = $devices[ $machineName ]
-                if( $device ) ## check same domain
-                {
-                    if( $domainName -and $device.DomainName -and $domainName -ne ( $device.DomainName -split '\.' )[0] )
-                    {
-                        $device = $null ## doesn't quite match
-                    }
-                }
-                if( ! $device )
-                {
-                    ## Now check machine catalogues so if ProvisioningType = PVS then we will look to see if it an orphan
-                    $catalogue = $catalogues[ $machine.CatalogName  ]
-                    if( ! $catalogue -or $catalogue.ProvisioningType -match $provisioningType )
-                    {
-                        $newItem = [pscustomobject]@{ 
-                            'Name' = ( $machine.MachineName -split '\\' )[-1] 
-                            'DomainName' = if( $machine.MachineName.IndexOf( '\' ) -gt 0 )
-                            {
-                                ($machine.MachineName -split '\\')[0]
-                            }
-                            else
-                            {
-                                $null
-                            }
-                            'DDC' = $ddc ;
-                            'Machine Catalogue' = $machine.CatalogName
-                            'Delivery Group' = $machine.DesktopGroupName
-                            'Registration State' = $machine.RegistrationState
-                            'Maintenance_Mode' = $( if( $machine.InMaintenanceMode ) { 'On' } else { 'Off' } )
-                            'User_Sessions' = $machine.SessionCount ; }
-
-                        Get-ADMachineInfo -name $newItem.Name -adparams $adparams -adGroups $ADgroups -item $newItem
-
-                        if( ! $noRemoting )
-                        {
-                            Add-Member -InputObject $newItem -NotePropertyMembers ( Get-RemoteInfo -computer $newItem.Name -cpuSamples $cpuSamples )
-                        }
-                        if( $tags )
-                        {
-                            Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'Tags' -Value ( $machine.Tags -join ',' )
-                        }
-                        if( $dns )
-                        {
-                            [array]$ipv4Address = @( Resolve-DnsName -Name $newItem.Name -Type A )
-                            Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
-                        }
-
-                        $devices.Add( $newItem.Name , $newItem )
-                    }
-                }
-            }
-        }
-    }
-    ## if we have VMware details then get those VMs and add if not present here
-    if( $hypervisors -and $hypervisors.Count )
-    {
-        ## will already be connected as have already grabbed VMs
-        Write-Progress -Activity "Checking for orphans on hypervisor $($hypervisors -split ' ')" -PercentComplete 99
-
-        [int]$vmCount = 0
-        $vms.GetEnumerator() | ForEach-Object `
-        {
-            $vmwareVM = $_.Value
-            $vmCount++
-            $existingDevice = $devices[ $vmwareVM.Name ]
-            ## Now have to see if we have restricted the PVS device retrieval via -name making $devices a subset of all PVS devices
-            if( ! $existingDevice -and ! [string]::IsNullOrEmpty( $name ) )
-            {
-                $existingDevice = $vmwareVM.Name -notmatch $name
-            }
-            if( ! $existingDevice )
-            {
-                $newItem = [pscustomobject]@{ 
-                    'Name' = $vmwareVM.Name
-                    'Description' = $vmwareVM.Notes
-                    'CPUs' = $vmwareVM.NumCpu 
-                    'Memory (GB)' = $vmwareVM.MemoryGB
-                    'Hard Drives (GB)' = $( ( Get-HardDisk -VM $vmwareVM -ErrorAction SilentlyContinue | sort CapacityGB | select -ExpandProperty CapacityGB ) -join ' ' )
-                    'NICS' = $( ( Get-NetworkAdapter -VM $vmwareVM -ErrorAction SilentlyContinue | Sort Type | Select -ExpandProperty Type ) -join ' ' )
-                    'Hypervisor' = $vmwareVM.VMHost
-                    'Active' = $( if($vmwareVM.PowerState -eq 'PoweredOn') { $true } else { $false } )
-                }
-                Get-ADMachineInfo -name $newItem.Name -adparams $adparams -adGroups $ADgroups -item $newItem
-
-                if( $vmwareVM.PowerState -eq 'PoweredOn' )
-                {
-                    if( ! $noRemoting )
-                    {
-                        Add-Member -InputObject $newItem -NotePropertyMembers ( Get-RemoteInfo -computer $newItem.Name -cpuSamples $cpuSamples )
-                    }
-                    if( $dns )
-                    {
-                        [array]$ipv4Address = @( Resolve-DnsName -Name $newItem.Name -Type A )
-                        Add-Member -InputObject $newItem  -MemberType NoteProperty -Name 'IPv4 address' -Value ( ( $ipv4Address | Select -ExpandProperty IPAddress ) -join ' ' )
-                    }
-                }
-
-                $devices.Add( $newItem.Name , $newItem )
-            }
-            if( ! $vmCount )
-            {
-                Write-Warning "Found no VMs on $($hypervisors -split ',') matching regex `"$name`""
-            }
-        }
-    }
-}
-
-Write-Progress -Activity 'Finished' -Completed -PercentComplete 100
+[hashtable]$devices = Get-PVSDevices -pvsservers $pvsServers -ddcs $ddcs -hypervisors $hypervisors -dns:$dns -name $name -tags:$tags -adgroups $ADgroups -noRemoting:$noRemoting -cpusamples:$cpuSamples -noProgress:$noprogress `
+    -maxThreads $maxThreads -timeout $timeout -jobTimeout $jobTimeout -maxRecordCount $maxRecordCount -provisioningType $provisioningType -noOrphans:$noOrphans -pvsShare $pvsShare -modules $modules -splitVM $splitVM
 
 if( $devices -and $devices.Count )
 {
@@ -1316,7 +835,7 @@ if( $devices -and $devices.Count )
             {
                 $WPFVMwareContextMenu.IsEnabled = $false
             }
-            if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
+            ifg( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
             {
                 $WPFADDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
             }
