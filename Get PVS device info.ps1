@@ -835,7 +835,7 @@ if( $devices -and $devices.Count )
             {
                 $WPFVMwareContextMenu.IsEnabled = $false
             }
-            ifg( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
+            if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
             {
                 $WPFADDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
             }
