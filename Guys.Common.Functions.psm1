@@ -6,6 +6,8 @@
     Modification history:
 
     20/06/18    GL  Added function to get Citrix PVS devices
+
+    12/12/18    GL  Added -quiet switch to Get-RemoteInfo
 #>
 
 ## internal use only
@@ -34,6 +36,7 @@ Function Extract-RemoteInfo( [array]$remoteInfo )
 
 Function Get-RemoteInfo
 {
+    [CmdletBinding()]
     Param
     (
         [Parameter(Mandatory=$true)]
@@ -41,8 +44,10 @@ Function Get-RemoteInfo
         [int]$jobTimeout = 60 , 
         [Parameter(Mandatory=$true)]
         [scriptblock]$work ,
+        [switch]$quiet ,
         [int]$miscparameter1 ## passed through to the script block
     )
+
     $results = $null
 
     [scriptblock]$code = `
@@ -68,12 +73,15 @@ Function Get-RemoteInfo
         {
             if( $command.HadErrors )
             {
-                Write-Warning "Errors occurred in remote command on $computer :`n$($command.Streams.Error)"
+                if( ! $quiet )
+                {
+                    Write-Warning "Errors occurred in remote command on $computer :`n$($command.Streams.Error)"
+                }
             }
             else
             {
                 $results = $command.EndInvoke($job)
-                if( ! $results )
+                if( ! $results -and ! $quiet )
                 {
                     Write-Warning "No data returned from remote command on $computer"
                 }
@@ -84,14 +92,20 @@ Function Get-RemoteInfo
         }
         else
         {
-            Write-Warning "Job to retrieve info from $computer is still running after $jobTimeout seconds so aborting"
+            if( ! $quiet )
+            {
+                Write-Warning "Job to retrieve info from $computer is still running after $jobTimeout seconds so aborting"
+            }
             $null = $command.BeginStop($null,$null)
             ## leaking command and runspace but if we dispose it hangs
         }
     }   
     catch
     {
-        Write-Error "Failed to get remote info from $computer : $($_.ToString())"
+        if( ! $quiet )
+        {
+            Write-Error "Failed to get remote info from $computer : $($_.ToString())"
+        }
     }
     $results
 }
