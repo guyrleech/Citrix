@@ -4,13 +4,8 @@
 
     Modification History:
 
-    #TODO: Sort columns so relevant next to each other and prefix joined ones with column name
-
-    @guyrleech 2019
-
-    Modification History:
-
     @guyrleech  04/03/20  Added Citrix Cloud capability
+    @guyrleech  05/03/20  Made -join run recursive. Fixed bug with date ranges
 #>
 
 <#
@@ -113,7 +108,7 @@ Param
     [Parameter(ParameterSetName='ddc',Mandatory=$false)]
     [ValidateSet('http','https')]
     [string]$protocol = 'http' ,
-    [int]$oDataVersion = -1
+    [int]$oDataVersion = 4
 )
 
 ## map tables to the date stamp we will filter on
@@ -210,7 +205,8 @@ Function Get-DateRanges
         [string]$query ,
         $from ,
         $to ,
-        [switch]$selective
+        [switch]$selective ,
+        [int]$oDataVersion
     )
     
     $field = $dateFields[ ($query -replace 's$' , '') ]
@@ -222,17 +218,168 @@ Function Get-DateRanges
         }
         $field = 'CreatedDate'
     }
-    if( $from )
+    if( $oDataVersion -ge 4 )
     {
-        "()?`$filter=$field ge datetime'$(Get-Date -date $from -format s)'"
+        if( $from )
+        {
+            "()?`$filter=$field ge $(Get-Date -date $from -format s)Z"
+        }
+        if( $to )
+        {
+            "and $field le $(Get-Date -date $to -format s)Z"
+        }
     }
-    if( $to )
+    else
     {
-        "and $field le datetime'$(Get-Date -date $to -format s)'"
+        if( $from )
+        {
+            "()?`$filter=$field ge datetime'$(Get-Date -date $from -format s)'"
+        }
+        if( $to )
+        {
+            "and $field le datetime'$(Get-Date -date $to -format s)'"
+        }
+    }
+}
+
+Function Resolve-CrossReferences
+{
+    Param
+    (
+        [Parameter(ValueFromPipelineByPropertyName=$true,ValueFromPipeline=$true)]
+        $properties ,
+        [switch]$cloud
+    )
+    
+    Process
+    {
+        $properties | Where-Object { ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(SessionKey)$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) }  | Select-Object -Property Name | ForEach-Object `
+        {
+            [string]$id = $Matches[1]
+            [bool]$current = $false
+            if( $id -match '^Current(.*)$' )
+            {
+                $current = $true
+                $id = $Matches[1]
+            }
+            elseif( $id -eq 'SessionKey' )
+            {
+                $id = 'Session'
+            }
+
+            if( ! $tables[ $id ] -and ! $alreadyFetched[ $id ] )
+            {
+                if( $cloud )
+                {
+                    $params.uri = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $customerid , $version ,  $id ) ## + (Get-DateRanges -query $id -from $from -to $to -selective -oDataVersion $oDataVersion)
+                }
+                else
+                {
+                    $params.uri = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $ddc , $version , $id ) ## + (Get-DateRanges -query $id -from $from -to $to -selective -oDataVersion $oDataVersion)
+                }
+
+                ## save looking up again, especially if it errors as we are not looking up anything valid
+                $alreadyFetched.Add( $id , $id )
+
+                [hashtable]$table = @{}
+                try
+                {
+                    Invoke-RestMethod @params | Invoke-ODataTransform | ForEach-Object `
+                    {
+                        ## add to hash table keyed on its id
+                        ## ToDo we need to go recursive to see if any of these have Ids that we need to resolve without going infintely recursive
+                        $object = $_
+                        [string]$thisId = $null
+                        [string]$keyName = $null
+
+                        if( $object.PSObject.Properties[ 'id' ] )
+                        {
+                            $thisId = $object.Id
+                            $keyName = 'id'
+                        }
+                        elseif( $object.PSObject.Properties[ 'SessionKey' ] )
+                        {
+                            $thisId = $object.SessionKey
+                            $keyname = 'SessionKey'
+                        }
+
+                        if( $thisId )
+                        {
+                            [string]$key = $(if( $thisId -match '\(guid''(.*)''\)$' )
+                                {
+                                    $Matches[ 1 ]
+                                }
+                                else
+                                {
+                                    $thisId
+                                })
+                            $object.PSObject.properties.remove( $key )
+                            $table.Add( $key , $object )
+                        }
+
+                        ## Look at other properties to figure if it too is an id and grab that table too if we don't have it already
+                        ForEach( $property in $object.PSObject.Properties )
+                        {
+                            if( $property.MemberType -eq 'NoteProperty' -and $property.Name -ne $keyName -and $property.Name -ne 'sid' -and $property.Name -match '(.*)Id$' )
+                            {
+                                $property | Resolve-CrossReferences -cloud:$cloud
+                            }
+                        }
+                    }
+                    if( $table.Count )
+                    {
+                        Write-Verbose -Message "Adding table $id with $($table.Count) entries"
+                        $tables.Add( $id , $table )
+                    }
+                }
+                catch
+                {
+                    $nop = $null
+                }
+            }
+        }
+    }
+}
+
+Function Resolve-NestedProperties
+{
+    Param
+    (
+        [Parameter(ValueFromPipelineByPropertyName=$true,ValueFromPipeline=$true)]
+        $properties ,
+        $previousProperties
+    )
+    
+    Process
+    {
+        $properties | Where-Object { $_.Name -ne 'sid' -and ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(Session)Key$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) } | ForEach-Object `
+        {
+            $property = $_
+                
+            if( ! [string]::IsNullOrEmpty( ( $id = ( $Matches[1] -replace '^Current' , '')) ))
+            {
+                if ( $table = $tables[ $id ] )
+                {
+                    if( $property.Value -and ( $item = $table[ ($property.Value -as [string]) ]))
+                    {
+                        $datum.PSObject.properties.remove( $property )
+                        $item.PSObject.Properties | ForEach-Object `
+                        {
+                            [pscustomobject]@{ "$id.$($_.Name)" = $_.Value }
+                            if( $_.Name -ne $property.Name -and ( ! $previousProperties -or ! ( $previousProperties | Where-Object Name -eq $_.Name ))) ## don't lookup self or a key if it was one we previously looked up
+                            {
+                                Resolve-NestedProperties -properties $_ -previousProperties $properties
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 [hashtable]$params = @{ 'ErrorAction' = 'SilentlyContinue' }
+[hashtable]$alreadyFetched = @{}
 
 if( $PSBoundParameters[ 'username' ] )
 {
@@ -260,7 +407,8 @@ if( $credential )
     $params.Add( 'UseDefaultCredentials' , $true )
 }
 
-[int]$highestVersion = if( $oDataVersion -le 0 ) { 10 } else { -1 }
+## used to try and figure out the highest supported oData version but proved problematic
+[int]$highestVersion = $oDataVersion ## if( $oDataVersion -le 0 ) { 10 } else { -1 }
 $fatalException = $null
 [int]$version = $oDataVersion
 
@@ -319,6 +467,8 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     $protocol = 'https'
 }
 
+[bool]$cloud = $false
+
 [array]$data = @( do
 {
     if( $oDataVersion -le 0 )
@@ -333,11 +483,12 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     
     if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     {
-        $params[ 'Uri' ] = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $customerid , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to)
+        $params[ 'Uri' ] = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $customerid , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
+        $cloud = $true
     }
     else
     {
-        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to)
+        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
     }
 
     Write-Verbose "URL : $($params.Uri)"
@@ -382,81 +533,37 @@ elseif( $data -and $data.Count )
     if( $PSBoundParameters[ 'join' ] )
     {
         [hashtable]$tables = @{}
+
         ## now figure out what other tables we need in order to satisfy these ids (not interested in id on it's own)
-        $data[0].PSObject.Properties | Where-Object { ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(SessionKey)$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) }|Select-Object -Property Name | ForEach-Object `
-        {
-            [string]$id = $Matches[1]
-            [bool]$current = $false
-            if( $id -match '^Current(.*)$' )
-            {
-                $current = $true
-                $id = $Matches[1]
-            }
-            elseif( $id -eq 'SessionKey' )
-            {
-                $id = 'Session'
-            }
-            if( $PsCmdlet.ParameterSetName -eq 'cloud' )
-            {
-                $params.uri = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $customerid , $version ,  $id ) + (Get-DateRanges -query $id -from $from -to $to -selective)
-            }
-            else
-            {
-                $params.uri = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $ddc , $version , $id ) + (Get-DateRanges -query $id -from $from -to $to -selective)
-            }
-            [hashtable]$table = @{}
-            try
-            {
-                Invoke-RestMethod @params | Invoke-ODataTransform | ForEach-Object `
-                {
-                    ## add to hash table keyed on its id
-                    ## ToDo we need to go recursive to see if any of these have Ids that we need to resolve without going infintely recursive
-                    $thisId = if( $_.Id -match '\(guid''(.*)''\)$' )
-                        {
-                            $Matches[ 1 ]
-                        }
-                        else
-                        {
-                            $_.Id
-                        }
-                    $_.PSObject.properties.remove( 'Id' )
-                    $table.Add( $thisId , $_ )
-                }
-                $tables.Add( $id , $table )
-            }
-            catch
-            {
-                $nop = $null
-            }
-        }
+        $data[0].PSObject.Properties | Resolve-CrossReferences -cloud:$cloud
+
+        [int]$originalPropertyCount = $data[0].PSObject.Properties.GetEnumerator()|Measure-Object |Select-Object -ExpandProperty Count
+        [int]$finalPropertyCount = -1
+
         ## now we need to add these cross referenced items
-        [bool]$firstIteration = $true
         ForEach( $datum in $data )
         {
-            $datum.PSObject.Properties | Where-Object { ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(Session)Key$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) }|Select-Object -ExpandProperty Name | ForEach-Object `
+            $datum.PSObject.Properties | Where-Object { $_.Name -ne 'sid' -and ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(Session)Key$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) } | ForEach-Object `
             {
                 $property = $_
-                
-                if( ( $id = ( $Matches[1] -replace '^Current' , '')) -and ( $table = $tables[ $id ]) )
+                Resolve-NestedProperties $property | ForEach-Object `
                 {
-                    if( ($index = $datum.psobject.Properties[ $property ]) -and $index.value -and ( $item = $table[ $index.Value ]))
+                    $_.PSObject.Properties | Where-Object MemberType -eq 'NoteProperty' | ForEach-Object `
                     {
-                        $datum.PSObject.properties.remove( $property )
-                        $item.PSObject.Properties | ForEach-Object `
-                        {
-                            Add-Member -InputObject $datum -MemberType NoteProperty -Name $_.Name -Value $_.Value -Force
-                        }
+                        Add-Member -InputObject $datum -MemberType NoteProperty -Name $_.Name -Value $_.Value
                     }
                 }
-                elseif( $firstIteration )
-                {
-                    Write-Warning "Have no table for joining on id $id"
-                }
-                $firstIteration = $false
             }
+
+            if( $finalPropertyCount -lt 0 )
+            {
+                $finalPropertyCount = $datum.PSObject.Properties.GetEnumerator()|Measure-Object |Select-Object -ExpandProperty Count
+                Write-Verbose -Message "Expanded from $originalPropertyCount properties to $finalPropertyCount"
+            }
+
+            $datum
         }
     }
-    $data
 }
 else
 {
