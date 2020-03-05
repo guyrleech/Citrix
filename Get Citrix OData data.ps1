@@ -2,21 +2,41 @@
 <#
     Get Director data from a Delivery controller
 
+    Modification History:
+
+    #TODO: Sort columns so relevant next to each other and prefix joined ones with column name
+
     @guyrleech 2019
+
+    Modification History:
+
+    @guyrleech  04/03/20  Added Citrix Cloud capability
 #>
 
 <#
 .SYNOPSIS
 
-Send queries to a Citrix Delivery Controller and present the results back as PowerShell objects
+Send queries to a Citrix Delivery Controller or Citrix Cloud and present the results back as PowerShell objects
 
 .PARAMETER ddc
 
 The Delivery Controller to query
 
+.PARAMETER customerId
+
+The Citrix Cloud customerid to query
+
+.PARAMETER authToken
+
+The Citrix cloud authentication token to use. If not specified will prompt for credentials
+
+.PARAMETER credential
+
+A credential object to use to connect to the specific Delivery Controller
+
 .PARAMETER query
 
-The item to query
+The item to query. If not specified, all services/queries available will be returned
 
 .PARAMETER join
 
@@ -60,23 +80,37 @@ Send a web request to the Delivery Controller ctxddc01 to retrieve the list of a
 
 Send a web request to the Delivery Controller ctxddc01 to retrieve the list of all connections created within the last 7 days and cross reference any id's returned
 
+.EXAMPLE
+
+'.\Get Citrix OData data.ps1' -customerid yourcloudid -query connections -join -last 7d
+
+Prompt for credentials for the Citrix Cloud customer with id yourcloudid, send a web request to the Citrix Cloud to retrieve the list of all connections created within the last 7 days and cross reference any id's returned
+
 .NOTES
 
 https://developer-docs.citrix.com/projects/monitor-service-odata-api/en/latest/
+
+If an auth token is not passed, the Citrix Remote PowerShell SDK must be available in order to get an auth token - https://www.citrix.com/downloads/citrix-cloud/product-software/xenapp-and-xendesktop-service.html
 
 #>
 
 Param
 (
-    [Parameter(Mandatory=$true)]
+    [Parameter(ParameterSetName='ddc',Mandatory=$true)]
     [string]$ddc ,
+    [Parameter(ParameterSetName='cloud',Mandatory=$true)]
+    [string]$customerid ,
+    [Parameter(ParameterSetName='cloud',Mandatory=$false)]
+    [string]$authtoken ,
     [string]$query ,
     [switch]$join ,
     [string]$last ,
     [datetime]$from ,
     [datetime]$to ,
+    [System.Management.Automation.PSCredential]$credential ,
     [string]$username , 
     [string]$password ,
+    [Parameter(ParameterSetName='ddc',Mandatory=$false)]
     [ValidateSet('http','https')]
     [string]$protocol = 'http' ,
     [int]$oDataVersion = -1
@@ -107,57 +141,64 @@ Function Invoke-ODataTransform
 
     Process
     {
-        if( ! $propertyNames )
+        if( $records -is [array] )
         {
-            $properties = ($records | Select -First 1).content.properties
-            if( $properties )
+            if( ! $propertyNames )
             {
-                $propertyNames = $properties | Get-Member -MemberType Properties | Select -ExpandProperty name
+                $properties = ($records | Select -First 1).content.properties
+                if( $properties )
+                {
+                    $propertyNames = $properties | Get-Member -MemberType Properties | Select -ExpandProperty name
+                }
+                else
+                {
+                    // v4+
+                    $propertyNames = 'NA' -as [string]
+                }
+            }
+            if( $propertyNames -is [string] )
+            {
+                $records | Select -ExpandProperty value
             }
             else
             {
-                // v4+
-                $propertyNames = 'NA' -as [string]
-            }
-        }
-        if( $propertyNames -is [string] )
-        {
-            $records | Select -ExpandProperty value
-        }
-        else
-        {
-            ForEach( $record in $records )
-            {
-                $h = @{ 'ID' = $record.ID }
-                $properties = $record.content.properties
-
-                ForEach( $propertyName in $propertyNames )
+                ForEach( $record in $records )
                 {
-                    $targetProperty = $properties.$propertyName
-                    if($targetProperty -is [Xml.XmlElement])
+                    $h = @{ 'ID' = $record.ID }
+                    $properties = $record.content.properties
+
+                    ForEach( $propertyName in $propertyNames )
                     {
-                        try
+                        $targetProperty = $properties.$propertyName
+                        if($targetProperty -is [Xml.XmlElement])
                         {
-                            $h.$propertyName = $targetProperty.'#text'
-                            ## see if we need to adjust for daylight savings
-                            if( $timeOffset -and ! [string]::IsNullOrEmpty( $h.$propertyName ) -and $targetProperty.type -match 'DateTime' )
+                            try
                             {
-                                $h.$propertyName = (Get-Date -Date $h.$propertyName).AddHours( $timeOffset )
+                                $h.$propertyName = $targetProperty.'#text'
+                                ## see if we need to adjust for daylight savings
+                                if( $timeOffset -and ! [string]::IsNullOrEmpty( $h.$propertyName ) -and $targetProperty.type -match 'DateTime' )
+                                {
+                                    $h.$propertyName = (Get-Date -Date $h.$propertyName).AddHours( $timeOffset )
+                                }
+                            }
+                            catch
+                            {
+                                ##$_
                             }
                         }
-                        catch
+                        else
                         {
-                            ##$_
+                            $h.$propertyName = $targetProperty
                         }
                     }
-                    else
-                    {
-                        $h.$propertyName = $targetProperty
-                    }
-                }
 
-                [PSCustomObject]$h
+                    [PSCustomObject]$h
+                }
             }
+        }
+        elseif( $records -and $records.PSObject.Properties[ 'value' ] ) ##JSON
+        {
+            $records.value
         }
     }
 }
@@ -190,6 +231,7 @@ Function Get-DateRanges
         "and $field le datetime'$(Get-Date -date $to -format s)'"
     }
 }
+
 [hashtable]$params = @{ 'ErrorAction' = 'SilentlyContinue' }
 
 if( $PSBoundParameters[ 'username' ] )
@@ -201,15 +243,19 @@ if( $PSBoundParameters[ 'username' ] )
 
     if( ! [string]::IsNullOrEmpty( $password ) )
     {
-        $credentials = New-Object System.Management.Automation.PSCredential( $username , ( ConvertTo-SecureString -AsPlainText -String $password -Force ) )
-        $params.Add( 'Credential' , $credentials )
+        $credential = New-Object System.Management.Automation.PSCredential( $username , ( ConvertTo-SecureString -AsPlainText -String $password -Force ) )
     }
     else
     {
         Throw "Must specify password when using -username either via -password or %RandomKey%"
     }
 }
-else
+
+if( $credential )
+{
+    $params.Add( 'Credential' , $credential )
+}
+ else
 {
     $params.Add( 'UseDefaultCredentials' , $true )
 }
@@ -253,6 +299,26 @@ if( $query -cmatch '^[a-z]' )
     $query = $TextInfo.ToTitleCase( $query ).ToString()
 }
 
+if( $PsCmdlet.ParameterSetName -eq 'cloud' )
+{
+    if( ! $PSBoundParameters[ 'authtoken' ] )
+    {
+        Add-PSSnapin -Name Citrix.Sdk.Proxy.*
+        if( ! ( Get-Command -Name Get-XDAuthentication -ErrorAction SilentlyContinue ) )
+        {
+            Throw "Unable to find the Get-XDAuthentication cmdlet - is the Virtual Apps and Desktops Remote PowerShell SDK installed ?"
+        }
+        Get-XDAuthentication -CustomerId $customerid
+        if( ! $? )
+        {
+            Throw "Failed to get authentication token for Cloud customer id $customerid"
+        }
+        $authtoken = $GLOBAL:XDAuthToken
+    }
+    $params.Add( 'Headers' , @{ 'Customer' = $customerid ; 'Authorization' = $authtoken } )
+    $protocol = 'https'
+}
+
 [array]$data = @( do
 {
     if( $oDataVersion -le 0 )
@@ -264,14 +330,21 @@ if( $query -cmatch '^[a-z]' )
         }
         $version = $highestVersion--
     }
-
-    $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to)
+    
+    if( $PsCmdlet.ParameterSetName -eq 'cloud' )
+    {
+        $params[ 'Uri' ] = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $customerid , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to)
+    }
+    else
+    {
+        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to)
+    }
 
     Write-Verbose "URL : $($params.Uri)"
 
     try
     {
-        if( ! $query )
+        if( ! $PSBoundParameters[ 'query' ] )
         {
             $services = Invoke-RestMethod @params
         }
@@ -323,7 +396,14 @@ elseif( $data -and $data.Count )
             {
                 $id = 'Session'
             }
-            $params.uri = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $ddc , $version , $id ) + (Get-DateRanges -query $id -from $from -to $to -selective)
+            if( $PsCmdlet.ParameterSetName -eq 'cloud' )
+            {
+                $params.uri = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $customerid , $version ,  $id ) + (Get-DateRanges -query $id -from $from -to $to -selective)
+            }
+            else
+            {
+                $params.uri = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}s" -f $protocol , $ddc , $version , $id ) + (Get-DateRanges -query $id -from $from -to $to -selective)
+            }
             [hashtable]$table = @{}
             try
             {
@@ -356,12 +436,10 @@ elseif( $data -and $data.Count )
             $datum.PSObject.Properties | Where-Object { ( $_.Name -match '^(.*)Id$' -or $_.Name -match '^(Session)Key$' ) -and ! [string]::IsNullOrEmpty( $Matches[1] ) }|Select-Object -ExpandProperty Name | ForEach-Object `
             {
                 $property = $_
-                $id = $Matches[1] -replace '^Current' , ''
-                $table = $tables[ $id ]
-                if( $table )
+                
+                if( ( $id = ( $Matches[1] -replace '^Current' , '')) -and ( $table = $tables[ $id ]) )
                 {
-                    $item = $table[ $datum.psobject.Properties[ $property ].Value ]
-                    if( $item )
+                    if( ($index = $datum.psobject.Properties[ $property ]) -and $index.value -and ( $item = $table[ $index.Value ]))
                     {
                         $datum.PSObject.properties.remove( $property )
                         $item.PSObject.Properties | ForEach-Object `
@@ -372,7 +450,7 @@ elseif( $data -and $data.Count )
                 }
                 elseif( $firstIteration )
                 {
-                    Write-Warning "Have no table for id $id"
+                    Write-Warning "Have no table for joining on id $id"
                 }
                 $firstIteration = $false
             }
