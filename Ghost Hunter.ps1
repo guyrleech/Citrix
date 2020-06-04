@@ -222,7 +222,7 @@ if( ( Get-Command -Name Get-BrokerSession -ErrorAction SilentlyContinue ) -eq $n
         }
         if( ! $usersActualSession -and ! $gotQuserError )
         {
-            $otherSessions = @( Get-BrokerSession -AdminAddress ywcxp2003 -UserName "$domainname\$UserName" | ?{ $_.SessionKey -ne $session.SessionKey } )
+            $otherSessions = @( Get-BrokerSession -AdminAddress $ddc -UserName "$domainname\$UserName" | ?{ $_.SessionKey -ne $session.SessionKey } )
             Add-Member -InputObject $session -MemberType NoteProperty -Name OtherSessions -Value ( ( $otherSessions | Select -ExpandProperty HostedMachineName ) -join ',' )
             Write-Warning "No session found on server $($session.HostedMachineName) for user $username, has $($otherSessions.Count) other sessions"
             if( $hide -and ! $session.Hidden -and $PSCmdlet.ShouldProcess( $username ,  "Hide session on $($session.HostedMachineName)" )  )
