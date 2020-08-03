@@ -25,6 +25,8 @@
     31/05/18  GL   Filter highest LoadIndex machines where not in maintenance mode
 
     08/06/18  GL   Added VMware support for use where machines aren't power managed by Citrix
+
+    19/03/20  GL   Added support for Citrix cloud and email server, vCenter & PVS credentials
 #>
 
 <#
@@ -35,6 +37,9 @@ Also includes application groups and desktops with tag restrictions
 
 .DESCRIPTION
 
+.PARAMETER profileName
+
+The name of a previosuly saved profile created using the secure client file created in the Cloud portal
 
 .PARAMETER ddcs
 
@@ -45,6 +50,14 @@ Only specify one DDC if you have more than one but they share the same SQL datab
 
 Comma separated list of Provisioning Services servers to extract information from although the cmdlets must be available from where the script runs from, e.g. where the PVS console is installed
 Only specify one PVS server if you have more than one but they share the same SQL database
+
+.PARAMETER pvsCredential
+
+Credentials to access PVS. Use when the account under which the script runs does not have PVS access.
+
+.PARAMETER vcenterCredential
+
+Credentials to access VMware vCenter. Use when the account under which the script runs does not have vCenter access.
 
 .PARAMETER vCentres
 
@@ -66,6 +79,10 @@ If the mail server only allows SMTP connections from specific machines, use this
 
 The email address which the email will be sent from
 
+.PARAMETER emailCredential
+
+Credential to authenticate on mail server
+
 .PARAMETER subject
 
 The subject of the email
@@ -77,6 +94,10 @@ Text to prepend to the subject of the email. Use the default subject but use thi
 .PARAMETER recipients
 
 Comma separated list of email addresses to send the report to
+
+.PARAMETER noCheckVDAs
+
+Do not check properties on VDAs. Use when they are not accessible from where the script is run or the account running the script does not have access
 
 .PARAMETER maxRecords
 
@@ -120,23 +141,40 @@ Append to a log file at the specified location
 
 Extract data from Delivery Controller ctxddc01 and PVS server ctxpvs01 and email the results via msscom01 as realying is not allowed via SMTP server smtpserver
 
+.EXAMPLE
+
+& '.\Daily checks.ps1' -profileName CloudAdmin -pvss -ctxpvs01 -mailserver smtpserver -proxymailserver msscom01 -qualifier "Constoso" -recipients support@somehwere.com,bob@contoso.com
+
+Extract data from the Citrix Cloud with credentials & details as stored in the previously created profile "CloudAdmin" and PVS server ctxpvs01 and email the results via msscom01 as realying is not allowed via SMTP server smtpserver
+
 .NOTES
 
 Uses local PowerShell cmdlets for PVS, DDCs and VMware, as well as Active Directory, so run from a machine where both PVS and Studio consoles and the VMware PowerCLI are installed.
 Also uses an additional module Guys.Common.Functions.psm1 which should be placed into the same folder as the main script itself.
 
+To store credentials for Citrix Cloud, download the secrets file via this article https://whatisavpnconnection.blogspot.com/2014/08/xenapp-xendesktop-remote-powershell-sdk.html and run the following with that csv file downloaded as an argument
+
+Set-XDCredentials -CustomerId "YourCustomerId" -ProfileType CloudApi -StoreAs CloudAdmin -SecureClientFile "C:\secureclient.csv" 
+
+Where "CloudAdmin" is what is then passed to the -ProfileName argument
 #>
 
 [CmdletBinding()]
 
 Param
 (
+    [Parameter(ParameterSetName='OnPrem')]
     [string[]]$ddcs = @( $env:Computername ) ,
     [string[]]$pvss = @( ) ,
     [string[]]$UNCs = @() ,
     [string[]]$vCentres = @() ,
+    [Parameter(ParameterSetName='Cloud')]
+    [string]$profileName ,
     [string]$mailserver ,
     [string]$proxyMailServer = 'localhost' ,
+    [System.Management.Automation.PSCredential]$emailCredential ,
+    [System.Management.Automation.PSCredential]$pvsCredential ,
+    [System.Management.Automation.PSCredential]$vCenterCredential ,
     [string]$from = "$env:Computername@$env:userdnsdomain" ,
     [string]$subject = "Daily checks $(Get-Date -Format F)" ,
     [string]$qualifier ,
@@ -149,8 +187,9 @@ Param
     [string]$logfile ,
     [int]$maxRecords = 2000 ,
     [int]$jobTimeout = 30 ,
+    [switch]$noCheckVDAs ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
-    [string[]]$modules = @( "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , "Guys.Common.Functions.psm1" ) ,
+    [string[]]$modules = @( "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , 'Guys.Common.Functions.psm1' ) ,
     [string]$vmwareModule = 'VMware.VimAutomation.Core'
 )
 
@@ -202,19 +241,19 @@ ForEach( $module in $modules )
     }
 }
 
-[array]$deliveryGroupStats = @()
 [string]$body = ''
-[array]$possiblyOverdueReboot = @()
-[array]$notPoweredOn = @()
-[array]$poweredOnUnregistered = @()
-[array]$longDisconnectedUsers = @()
-[array]$highestUsedMachines = @()
-[array]$highestLoadIndexes = @()
-[array]$sites = @()
-[array]$pvsRetries = @()
-[array]$fileShares = @()
-[array]$deliveryGroupStatsVDI = @()
-[array]$deliveryGroupStatsXenApp = @()
+$deliveryGroupStats = New-Object -TypeName System.Collections.Generic.List[psobject]
+$possiblyOverdueReboot = New-Object -TypeName System.Collections.Generic.List[psobject]
+$notPoweredOn = New-Object -TypeName System.Collections.Generic.List[psobject]
+$poweredOnUnregistered = New-Object -TypeName System.Collections.Generic.List[psobject]
+$longDisconnectedUsers = New-Object -TypeName System.Collections.Generic.List[psobject]
+$highestUsedMachines = New-Object -TypeName System.Collections.Generic.List[psobject]
+$highestLoadIndexes = New-Object -TypeName System.Collections.Generic.List[psobject]
+$sites = New-Object -TypeName System.Collections.Generic.List[psobject]
+$pvsRetries = New-Object -TypeName System.Collections.Generic.List[psobject]
+$fileShares = New-Object -TypeName System.Collections.Generic.List[psobject]
+$deliveryGroupStatsVDI = New-Object -TypeName System.Collections.Generic.List[psobject]
+$deliveryGroupStatsXenApp = New-Object -TypeName System.Collections.Generic.List[psobject]
 $taggedApplicationGroups = New-Object System.Collections.ArrayList
 $taggedDesktops = New-Object System.Collections.ArrayList
 $failedToGetBootTime = New-Object System.Collections.ArrayList
@@ -250,13 +289,16 @@ if( $vCentres -and $vCentres.Count -gt 0 )
 {
     Import-Module $vmwareModule -ErrorAction Stop
 
-    ## Disable certificate warnings
-    $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
-	$vic = Connect-VIServer -Server $vCentres 
-
-	if( ! $? -or ! $vic )
+    ## Disable certificate and deprecation warnings
+    $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false -DisplayDeprecationWarnings:$false 
+    [hashtable]$vCenterParams = @{ 'Server' = $vCentres }
+    if( $PSBoundParameters[ 'vCenterCredential' ] )
+    {
+        $vCenterParams.Add( 'credential' , $vCenterCredential )
+    }
+	if( ! ( $vic = Connect-VIServer @vCenterParams ) -or ! $? )
 	{
-  	  exit
+  	    Throw "Failed to connect to vCenters $vCentres"
 	}
 }
 
@@ -280,7 +322,19 @@ ForEach( $pvs in $pvss )
 {
     if( Get-Command -Name Set-PvsConnection -ErrorAction SilentlyContinue )
     {
-        Set-PvsConnection -Server $pvs
+        [hashtable]$pvsParameters = @{ 'Server' = $pvs }
+        if( $PSBoundParameters[ 'pvsCredential' ] )
+        {
+            $pvsParameters += @{
+                'User' = ($pvsCredential.UserName -split '\\')[-1]
+                'Domain' = ($pvsCredential.UserName -split '\\')[0]
+                'Password' = $pvsCredential.GetNetworkCredential().Password
+            }
+        }
+        Set-PvsConnection @pvsParameters
+        $pvsParameters[ 'Password' ] = 'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
+        $pvsParameters = $null
+
         ## Status is comma separated value where first field is the number of retries
         $pvsRetries += Get-PvsDeviceInfo| Select -Property Name,@{n='PVS Server';e={$_.ServerName}},SiteName,CollectionName,DiskLocatorName,
             @{n='Retries';e={($_.status -split ',')[0] -as [int]}},DiskVersion
@@ -293,9 +347,19 @@ ForEach( $pvs in $pvss )
 
 ForEach( $ddc in $ddcs )
 {
-    [array]$machines = @( Get-BrokerMachine -AdminAddress $ddc -MaxRecordCount $maxRecords | Where-Object { $_.MachineName -notmatch $excludedMachines } )
-    [array]$users = @( Get-BrokerSession -AdminAddress $ddc -MaxRecordCount $maxRecords  | Where-Object { $_.MachineName -notmatch $excludedMachines } )
-    [array]$XenAppDeliveryGroups = @( Get-BrokerDesktopGroup -AdminAddress $ddc -SessionSupport MultiSession )
+    [hashtable]$params = @{}
+    if( $PSBoundParameters[ 'profileName' ] )
+    {
+        Get-XDAuthentication -ProfileName $profileName -ErrorAction Stop
+        $ddc = 'Cloud'
+    }
+    else
+    {
+        $params.Add( 'AdminAddress' , $ddc )
+    }
+    [array]$machines = @( Get-BrokerMachine @params -MaxRecordCount $maxRecords | Where-Object { $_.MachineName -notmatch $excludedMachines } )
+    [array]$users = @( Get-BrokerSession @params -MaxRecordCount $maxRecords  | Where-Object { $_.MachineName -notmatch $excludedMachines } )
+    [array]$XenAppDeliveryGroups = @( Get-BrokerDesktopGroup @params -SessionSupport MultiSession )
     [int]$registeredMachines = $machines | Where-Object { $_.RegistrationState -eq 'Registered' } | Measure-Object | Select -ExpandProperty Count
 
     $body += "Got $($machines.Count) machines from $ddc with $(($users | Where-Object { $_.SessionState -eq 'Active' }).Count) users active and $(($users | Where-Object { $_.SessionState -eq 'Disconnected' }).Count) disconnected`n"
@@ -304,8 +368,8 @@ ForEach( $ddc in $ddcs )
     if( ( Get-Command -Name Get-BrokerTag -ErrorAction SilentlyContinue ) `
         -and ( Get-Command -Name Get-BrokerApplicationGroup -ErrorAction SilentlyContinue ) )## came later on in 7.x so not necessarily present
     {
-        [array]$allApplicationGroups = @( Get-BrokerApplicationGroup -AdminAddress $ddc )
-        Get-BrokerTag -AdminAddress $ddc | ForEach-Object `
+        [array]$allApplicationGroups = @( Get-BrokerApplicationGroup @params )
+        Get-BrokerTag @params | ForEach-Object `
         {
             $tag = $_
             if( ! $excludedTags -or $excludedTags -notcontains $tag.Name )
@@ -325,7 +389,7 @@ ForEach( $ddc in $ddcs )
             $XenAppDeliveryGroups | ForEach-Object `
             {
                 $deliveryGroup = $_
-                Get-BrokerEntitlementPolicyRule -DesktopGroupUid $deliveryGroup.uid -AdminAddress $ddc -RestrictToTag $tag.Name | ForEach-Object `
+                Get-BrokerEntitlementPolicyRule -DesktopGroupUid $deliveryGroup.uid @params -RestrictToTag $tag.Name | ForEach-Object `
                 {
                     $desktop = $_
                     [int]$taggedMachinesAvailable = $machines | Where-Object { $_.DesktopGroupName -eq $deliveryGroup.Name -and $_.Tags -contains $tag.Name -and $_.InmaintenanceMode -eq $false -and $_.RegistrationState -eq 'Registered' -and $_.WindowsConnectionSetting -eq 'LogonEnabled' } | Measure-Object | Select -ExpandProperty Count
@@ -365,17 +429,17 @@ ForEach( $ddc in $ddcs )
             }
         }
     }
-    $poweredOnUnregistered += @( $machines | Where-Object { $(if( $vic ) { $vmwareMachines[ ($_.MachineName -split '\\')[-1] ].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On' } ) -and $_.RegistrationState -eq 'Unregistered' -and ! $_.InMaintenanceMode } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
+    $poweredOnUnregistered += @( $machines | Where-Object { $(if( $vic ) { ($vmwareMachines[ ($_.MachineName -split '\\')[-1] ]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOn' } else { $_.PowerState -eq 'On' } ) -and $_.RegistrationState -eq 'Unregistered' -and ! $_.InMaintenanceMode } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
     
-    $notPoweredOn += @( $machines | Where-Object { $(if( $vic ) { $vmwareMachines[ ($_.MachineName -split '\\')[-1] ].PowerState -eq 'PoweredOff' } else { $_.PowerState -eq 'Off'  } ) } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
+    $notPoweredOn += @( $machines | Where-Object { $(if( $vic ) { ($vmwareMachines[ ($_.MachineName -split '\\')[-1] ]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOff' } else { $_.PowerState -eq 'Off'  } ) } | Select @{n='Machine Name';e={($_.MachineName -split '\\')[-1]}},DesktopGroupName,CatalogName,InMaintenanceMode )
    
-    $possiblyOverdueReboot += if( $lastRebootedDaysAgo )
+    $possiblyOverdueReboot += if( $lastRebootedDaysAgo -and ! $noCheckVDAs )
     {
         [decimal]$slowestRemoteJob = 0
         [decimal]$fastestRemoteJob = [int]::MaxValue
         [datetime]$lastRebootedThreshold = (Get-Date).AddDays( -$lastRebootedDaysAgo )
 
-        $machines | Where-Object { if( $vic ) { $vmwareMachines[($_.MachineName -split '\\')[-1]].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }} | ForEach-Object `
+        $machines | Where-Object { if( $vic ) { ($vmwareMachines[($_.MachineName -split '\\')[-1]]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }} | ForEach-Object `
         {
             $machine = $_
             [string]$machineName = ($machine.MachineName -split '\\')[-1]
@@ -409,12 +473,12 @@ ForEach( $ddc in $ddcs )
         Write-Verbose "Fatest remote job was $fastestRemoteJob seconds, slowest $slowestRemoteJob seconds"
     }
         
-    [int]$inMaintenanceModeAndOn = $machines | Where-Object { $_.InMaintenanceMode -eq $true -and $(if( $vic ) { $vmwareMachines[($_.MachineName -split '\\')[-1]].PowerState -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }) } | Measure-Object | Select -ExpandProperty Count
+    [int]$inMaintenanceModeAndOn = $machines | Where-Object { $_.InMaintenanceMode -eq $true -and $(if( $vic ) { ($vmwareMachines[($_.MachineName -split '\\')[-1]]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }) } | Measure-Object | Select -ExpandProperty Count
 
     $body += "`t$inMaintenanceModeAndOn powered on machines are in maintenance mode ($([math]::round(( $inMaintenanceModeAndOn / $machines.Count) * 100))%)`n"
     $body += "`t$registeredMachines machines are registered ($([math]::round(( $registeredMachines / $machines.Count) * 100))%)`n"
     $body += "`t$($notPoweredOn.Count) machines are not powered on ($([math]::round(( $notPoweredOn.Count / $machines.Count) * 100))%)`n"
-    if( $lastRebootedDaysAgo )
+    if( $lastRebootedDaysAgo -and ! $noCheckVDAs )
     {
         $body += "`t$($possiblyOverdueReboot.Count) machines have not been rebooted in last $lastRebootedDaysAgo days ($([math]::round(( $possiblyOverdueReboot.Count / $machines.Count) * 100))%)`n"
         $body += "`t$($failedToGetBootTime.Count) powered on machines failed to return boot time ($([math]::round(( $failedToGetBootTime.Count / $machines.Count) * 100))%)`n"
@@ -428,13 +492,13 @@ ForEach( $ddc in $ddcs )
     }
 
     ## Retrieve delivery group stats - separate for VDI and XenApp as we are interested in subtly different things
-    $deliveryGroupStatsVDI += Get-BrokerDesktopGroup -AdminAddress $ddc -SessionSupport SingleSession | Sort PublishedName | Select @{'n'='Delivery Controller';'e'={$ddc}},PublishedName,Enabled,InMaintenanceMode,DesktopsAvailable,DesktopsDisconnected,DesktopsInUse,@{n='% available';e={[math]::Round( $_.DesktopsAvailable / ($_.DesktopsAvailable + $_.DesktopsDisconnected + $_.DesktopsInUse) * 100 )}},DesktopsPreparing,DesktopsUnregistered 
+    $deliveryGroupStatsVDI += Get-BrokerDesktopGroup @params -SessionSupport SingleSession | Sort PublishedName | Select @{'n'='Delivery Controller';'e'={$ddc}},PublishedName,Enabled,InMaintenanceMode,DesktopsAvailable,DesktopsDisconnected,DesktopsInUse,@{n='% available';e={[math]::Round( $_.DesktopsAvailable / ($_.DesktopsAvailable + $_.DesktopsDisconnected + $_.DesktopsInUse) * 100 )}},DesktopsPreparing,DesktopsUnregistered 
     $deliveryGroupStatsXenApp += $XenAppDeliveryGroups | ForEach-Object `
     {
         $deliveryGroup = $_.Name
         [string]$rebootState = $null
         [string]$lastRebootsEnded = $null
-        Get-BrokerRebootCycle -DesktopGroupName $deliveryGroup -AdminAddress $ddc | Sort -Property StartTime -Descending | Select -First 1 | ForEach-Object `
+        Get-BrokerRebootCycle -DesktopGroupName $deliveryGroup @params | Sort -Property StartTime -Descending | Select -First 1 | ForEach-Object `
         {
             if( ! [string]::IsNullOrEmpty( $rebootState ) )
             {
@@ -483,7 +547,7 @@ ForEach( $ddc in $ddcs )
         }
     }
     
-    $sites += Get-BrokerSite -AdminAddress $ddc | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv
+    $sites += Get-BrokerSite @params | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv
 }
 
 if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) )
@@ -569,7 +633,7 @@ if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserv
         ForEach( $disconnectedUser in $longDisconnectedUsers )
         {
             [array]$serverSessions = $sessions[ $disconnectedUser.'Machine Name' ]
-            if( ! $serverSessions )
+            if( ! $serverSessions -and ! $noCheckVDAs )
             {
                 ## Get users from machine - if we just run quser then get error for no users so this method make it squeaky clean
                 $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -651,7 +715,26 @@ if( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserv
     }
     $htmlBody = ConvertTo-Html -PostContent $htmlBody -Head $style
 
-    Invoke-Command -ComputerName $proxyMailServer -ScriptBlock { Send-MailMessage -Subject $using:subject -BodyAsHtml -Body $using:htmlBody -From $using:from -To $using:recipients -SmtpServer $using:mailserver }
+    [hashtable]$mailParams = @{
+        'Subject' = $subject 
+        'BodyAsHtml' = $true
+        'Body' = $htmlBody
+        'From' = $from
+        'To' = $recipients
+        'SmtpServer' = $mailserver
+    }
+    if( $PSBoundParameters[ 'emailCredential' ] )
+    {
+        $mailParams.Add( 'credential' , $emailCredential )
+    }
+    if( $PSBoundParameters[ 'proxyMailServer' ] )
+    {
+        Invoke-Command -ComputerName $proxyMailServer -ScriptBlock { Send-MailMessage @Using:mailParams }
+    }
+    else
+    {
+        Send-MailMessage @mailParams
+    }
 }
 
 if( $vic )
