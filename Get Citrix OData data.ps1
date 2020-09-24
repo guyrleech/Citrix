@@ -501,7 +501,7 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
         }
         else
         {
-            Invoke-RestMethod @params | Invoke-ODataTransform
+            @( Invoke-RestMethod @params ) | Invoke-ODataTransform
         }
         $fatalException = $null
         break ## since call succeeded so that we don't report for lower versions
@@ -509,6 +509,10 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     catch
     {
         $fatalException = $_
+        if( $_.Exception.response.StatusCode -eq 'Unauthorized' )
+        {
+            Throw $fatalException
+        }
     }
 } while ( $highestVersion -gt 0 ) )
 
