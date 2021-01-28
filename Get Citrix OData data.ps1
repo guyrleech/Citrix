@@ -136,7 +136,7 @@ Function Invoke-ODataTransform
 
     Process
     {
-        if( $records -is [array] )
+        if( $records -is [array] -or oDataVersion -eq 3 )
         {
             if( ! $propertyNames )
             {
@@ -567,6 +567,9 @@ elseif( $data -and $data.Count )
 
             $datum
         }
+    }
+    else{
+        $data
     }
 }
 else
