@@ -63,6 +63,20 @@
     20/06/18    GL  Added option to split VMware VM names in case have description, etc after an _ character or similar
 
     21/01/21    GL  Added remove from delivery group option
+
+    16/06/21    GL  Bug fixes where full domain name passed as part of machine name to DDC actions
+#>
+
+<#
+Copyright © 2021 Guy Leech
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #>
 
 <#
@@ -567,15 +581,20 @@ Function Perform-Action( [string]$action , $form )
     {
         Write-Verbose "Action $action on $($device.Name)"
 
+        [string]$FQDN = $device.Name
+        if( ! [string]::IsNullOrEmpty( $device.DomainName ) )
+        {
+            $FQDN = ( $device.DomainName -split '\.')[0] + '\' +  $device.Name
+        }
         switch -regex ( $action )
         {
-            'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName ( $env:USERDOMAIN + '\' +  $device.Name ) | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  ;break }
+            'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName $FQDN | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  ;break }
             'Remove From AD' { Remove-ADComputer -Identity $device.Name -Confirm:$False ;break }
-            'Remove From Delivery Group' { Remove-BrokerMachine -Force -DesktopGroup $device.'Delivery Group' -AdminAddress $device.ddc -MachineName $( if( [string]::IsNullOrEmpty( $device.DomainName ) ) { $device.Name } else {  $device.DomainName + '\' +  $device.Name } ) ; break  }
-            'Remove From DDC' { Remove-BrokerMachine -Force -AdminAddress $device.ddc -MachineName $( if( [string]::IsNullOrEmpty( $device.DomainName ) ) { $device.Name } else {  $device.DomainName + '\' +  $device.Name } ) ; break  }
+            'Remove From Delivery Group' { Remove-BrokerMachine -Force -DesktopGroup $device.'Delivery Group' -AdminAddress $device.ddc -MachineName $FQDN ; break  }
+            'Remove From DDC' { Remove-BrokerMachine -Force -AdminAddress $device.ddc -MachineName $FQDN ; break  }
             'Remove From PVS' { Set-PvsConnection -Server $device.'PVS Server'; Remove-PvsDevice -DeviceName $device.Name ; break }
-            'Maintenance Mode On'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true  -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
-            'Maintenance Mode Off' { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $false -MachineName ( $device.DomainName + '\' +  $device.Name ) ; break }
+            'Maintenance Mode On'  { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $true  -MachineName $FQDN ; break }
+            'Maintenance Mode Off' { Set-BrokerMachine -AdminAddress $device.ddc -InMaintenanceMode $false -MachineName $FQDN ; break }
             'Reboot' { Restart-Computer -ComputerName $device.Name ; break }
             'Shutdown' { Stop-Computer -ComputerName $device.Name ; break }
             'Remove from Hypervisor' { Get-VM -Name $device.Name | Remove-VM -DeletePermanently -Confirm:$false ;break }
@@ -814,8 +833,8 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUUJIFakZfLcNPKbCkn1xDh6UU
-# La+gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUW2Cqo9USKdmv/JzYUVM6xUL3
+# jKqgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -876,11 +895,11 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFMvCyoaarpXf1m3I9rXz
-# +mGEcDt9MA0GCSqGSIb3DQEBAQUABIIBABAZbhYs8iZ9RLxXClyggrVfqjWAPRza
-# ZNWivDAQSnUZzTa8CPVCfDJe/uuIHiXzwS0SNvm1dpC7frDkz+bOKilWkDVbWWiC
-# fmwtbV9rV38srPs2smJMznwmrHr4H42VJqCQaBGDnTvaMgSkMosJsmc2ZCEWjtPc
-# zKsvtP8wvBmp+bOXJybNWx51DjDVRD+0dHR+dIpZEk5L39LWh5eNmpvl1ONeu/Lt
-# ffAvesA06kS0PQZ7YsO45B0b/y2qEkNh6fTT3tGzvTVv4xgJSW2NwIrmYPw1TPfy
-# AEtcPa2D+ejBnC+Fsdn2O380+EBHE/Xkk7VnYXGsdXfxMrhVLVlDGNA=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFFYfMu+G8J/nL6O4wDb4
+# jFwod8zYMA0GCSqGSIb3DQEBAQUABIIBAGlPM8Lt5qml+0FxmnQX45NTycPJBz4W
+# muZaFAgfT5eWQZ8/bB3UTCGX3k8u10k/uW12vWJGaHgGnEwUVuSEhuSIa3pXD2Zl
+# JQ0UJQeDtjMDiXBbJXVyMFp/caypLdmy/xMZVr83f2Wj2ZYXUTe1hbG8wbFWkoH+
+# 2H2t1aPx2T+/j8oNza89iNZH/xWrCRGIFBhn92KoNflSCA2EijbjAHJ4iwfpOZgV
+# WbEPWp35EdbLIAcN0tXBLNiRnVsZXsODTlvtDA4IGOmxYULwXjlmDnr1zTxUL3qW
+# spZDwbQzJiurDUK3m0QpmDjnLiinp0h7rmbGmSn4WAvBCEaR9rHi+rQ=
 # SIG # End signature block
