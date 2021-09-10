@@ -29,6 +29,8 @@
     19/03/20  GL   Added support for Citrix cloud and email server, vCenter & PVS credentials
 
     09/06/21  GL   Fix for divide by zero when no tagged machines. Added output to html file instead of email. Only show PVS retries when they are non-zero
+
+    10/09/21  GL   Added licence details. Fix for Get-BrokerDesktopGroup not using -MaxRecordCount
 #>
 
 <#
@@ -175,6 +177,19 @@ To store credentials for Citrix Cloud, download the secrets file via this articl
 Set-XDCredentials -CustomerId "YourCustomerId" -ProfileType CloudApi -StoreAs CloudAdmin -SecureClientFile "C:\secureclient.csv" 
 
 Where "CloudAdmin" is what is then passed to the -ProfileName argument
+#>
+
+
+<#
+Copyright © 2018 Guy Leech
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #>
 
 [CmdletBinding()]
@@ -385,7 +400,7 @@ ForEach( $ddc in $ddcs )
     }
     [array]$machines = @( Get-BrokerMachine @params -MaxRecordCount $maxRecords | Where-Object { $_.MachineName -notmatch $excludedMachines } )
     [array]$users = @( Get-BrokerSession @params -MaxRecordCount $maxRecords  | Where-Object { $_.MachineName -notmatch $excludedMachines } )
-    [array]$XenAppDeliveryGroups = @( Get-BrokerDesktopGroup @params -SessionSupport MultiSession )
+    [array]$XenAppDeliveryGroups = @( Get-BrokerDesktopGroup @params -MaxRecordCount $maxRecords -SessionSupport MultiSession )
     [int]$registeredMachines = $machines | Where-Object { $_.RegistrationState -eq 'Registered' } | Measure-Object | Select -ExpandProperty Count
 
     $body += "Got $($machines.Count) machines from $ddc with $(($users | Where-Object { $_.SessionState -eq 'Active' })|Measure-Object|Select-Object -ExpandProperty Count) users active and $(($users | Where-Object { $_.SessionState -eq 'Disconnected' })|Measure-Object|Select-Object -ExpandProperty Count) disconnected`n"
@@ -465,6 +480,7 @@ ForEach( $ddc in $ddcs )
         [decimal]$slowestRemoteJob = 0
         [decimal]$fastestRemoteJob = [int]::MaxValue
         [datetime]$lastRebootedThreshold = (Get-Date).AddDays( -$lastRebootedDaysAgo )
+        $machine = $null
 
         $machines | Where-Object { if( $vic ) { ($vmwareMachines[($_.MachineName -split '\\')[-1]]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }} | ForEach-Object `
         {
@@ -497,7 +513,11 @@ ForEach( $ddc in $ddcs )
                 $null = $failedToGetBootTime.Add( [pscustomobject]@{ 'Machine' = $machineName ; 'Delivery Group' = $machine.DesktopGroupName ; 'Machine Catalogue' = $machine.CatalogName ; 'Maintenance Mode' = $machine.InMaintenanceMode ; 'Registration State' = $machine.RegistrationState ; 'User Sessions' = $machine.SessionCount ; 'Tags' = $machine.Tags -join ' ' } )
             }
         }
-        Write-Verbose "Fatest remote job was $fastestRemoteJob seconds, slowest $slowestRemoteJob seconds"
+        if( ! $machine )
+        {
+            $fastestRemoteJob = 0 ## no machines were processed
+        }
+        Write-Verbose "Fastest remote job was $fastestRemoteJob seconds, slowest $slowestRemoteJob seconds"
     }
         
     [int]$inMaintenanceModeAndOn = $machines | Where-Object { $_.InMaintenanceMode -eq $true -and $(if( $vic ) { ($vmwareMachines[($_.MachineName -split '\\')[-1]]|Select-Object -ExpandProperty PowerState) -eq 'PoweredOn' } else { $_.PowerState -eq 'On'  }) } | Measure-Object | Select -ExpandProperty Count
@@ -574,7 +594,7 @@ ForEach( $ddc in $ddcs )
         }
     }
     
-    $sites += Get-BrokerSite @params | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv
+    $sites += Get-BrokerSite @params | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv,LicenseServerName
 }
 
 if( $PSBoundParameters[ 'outputFile' ] -or ( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) ) )
@@ -599,6 +619,38 @@ if( $PSBoundParameters[ 'outputFile' ] -or ( $recipients -and $recipients.Count 
     [string]$htmlBody = "<h2>Summary</h2>`n" + $body -split "`n" | ForEach-Object { "<p>$($_ -replace '\t' , '&nbsp;&nbsp;&nbsp;&nbsp;')</p>`n" }
 
     $htmlBody += $sites | ConvertTo-Html -Fragment -PreContent '<h2>Site Information<h2>'| Out-String
+
+    if( [string]::IsNullOrEmpty( $profileName ) ) ## no licence info exposed for Cloud
+    {
+        ForEach( $site in $sites )
+        {
+            if( ( $licencePoolInfo = @( Get-CimInstance -ComputerName $site.LicenseServerName -Namespace root/CitrixLicensing -ClassName Citrix_GT_License_Pool ) ) `
+                -and ( $licenceInfo = @( Get-CimInstance -ComputerName $site.LicenseServerName -Namespace root/CitrixLicensing -ClassName Citrix_GT_License ) ) ) ## need to get expiry date
+            {
+                ## Try and cross match licences to usage
+                [array]$combinedLicences = @(ForEach( $licence in $licenceInfo )
+                {
+                    if( $usage = $licencePoolInfo.Where( { $licence.LicenseType -eq $_.LicenseType -and $licence.PLD -eq $_.PLD } ) )
+                    {
+                        if( $usage.PSObject.Properties[ 'count' ] -and $usage.Count -gt 1 ) ## not an array
+                        {
+                            $usage = $usage.Where( { $_.Count -eq $licence.Count -and $_.SubscriptionDate -eq $licence.SubscriptionDate } ) | Sort-Object -Property ExpirationDate | Select-Object -First 1 ## best we can do so show soonest expiring
+                        }
+                        if( $usage )
+                        {
+                            Add-Member -InputObject $licence -NotePropertyMembers @{ InUseCount = $usage.InUseCount ; PooledAvailable = $usage.PooledAvailable }
+                        }
+                    }
+                    $licence
+                }) 
+                $htmlBody += $combinedLicences | Select-Object -Property Count,InUseCount,PooledAvailable,OverDraft,PLDFullName,ExpirationDate,LicenseType,SubscriptionDate -ErrorAction SilentlyContinue | Sort-Object -Property ExpirationDate | ConvertTo-Html -Fragment -PreContent "<h2>Summary of licences from licence server $($site.LicenseServerName)<h2>" | Out-String
+            }
+            else
+            {
+                $htmlBody += "Failed to retrieve licences via WMI from $($site.LicenseServerName)"
+            }
+        }
+    }
 
     if( $deliveryGroupStatsVDI -and $deliveryGroupStatsVDI.Count )
     {
@@ -793,8 +845,8 @@ if( ! [string]::IsNullOrEmpty( $logfile ) )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUJdkvgtAey/vU10C0DyuQbDM2
-# zA6gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU/Cj8V5oq5wx9G4wreKqtHQLY
+# l96gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -855,11 +907,11 @@ if( ! [string]::IsNullOrEmpty( $logfile ) )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFEr90XAHXLI1/Ubuj2mR
-# SBQgk5xSMA0GCSqGSIb3DQEBAQUABIIBAKcLarGKVdIzoNAvtJkfjHeAK+s+14Hd
-# cic6f/GoLko+sXIHgND5DORjeGiVWwaQ4LR2CVWzlwTJuZ2kyzHReliAlTxvTUVR
-# Z//8rW3gjh2wECZykWHkYXI7C84pKnGAfIGIW8Rhwgz5rmPk+gBh0CQldLfxNYs/
-# QDIPc4x/oSTpk+g88OVhZ3FzszcMvMUzin0EljAf2g0/lCRXCusyt6gkpQ3gsMkC
-# 498u5J6Oypasl3GGnDCT8SZ4F0W0mZ4GIrmANLleH/4QwWiir270dx7Mj8dboGxp
-# i0m5BmPULXv99Os9u58xIErI/gmTRUyMDOkZSZcuvMAq5K1YlgWY0xA=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHWgrK+UtlaUH2AHw9jX
+# W2L7wTAzMA0GCSqGSIb3DQEBAQUABIIBAGEUNIrKbybhL+GL5CNnwLBXqUiRrbOK
+# c1/iJjwABHAPw7LwOhJEB+YDHtkb1TNo+AgJ/hs1ZklPNPyLYOYR5d9VONyuS4QY
+# EE3soq7uPHECLI0uRaTUY1h/X+WAddqjo0DuYFGXDZ9SJ7TjgvNYbsifDMtMwB8Z
+# H4fqGPNEUdPmyBikFKHNYJNAwuzYLJhrVxd7SKkHZZqiMJDDY4nNFQFAJrSD/sKE
+# ND+dG++5Zd1JsKgrntfR38fiJsqGbq9JKgwcmJG5gjQQscGB6Oo2KfHNxo2uWQf1
+# hlJ3qKlMlk/RLzgGcLhcSqntXg7bzOGzm2fUatnTR7qCrW3b0XMpxyo=
 # SIG # End signature block
