@@ -31,6 +31,7 @@
     09/06/21  GL   Fix for divide by zero when no tagged machines. Added output to html file instead of email. Only show PVS retries when they are non-zero
 
     10/09/21  GL   Added licence details. Fix for Get-BrokerDesktopGroup not using -MaxRecordCount
+                   Added details of delivery controllers
 #>
 
 <#
@@ -290,6 +291,7 @@ $longDisconnectedUsers = New-Object -TypeName System.Collections.Generic.List[ps
 $highestUsedMachines = New-Object -TypeName System.Collections.Generic.List[psobject]
 $highestLoadIndexes = New-Object -TypeName System.Collections.Generic.List[psobject]
 $sites = New-Object -TypeName System.Collections.Generic.List[psobject]
+$controllers = New-Object -TypeName System.Collections.Generic.List[psobject]
 $pvsRetries = New-Object -TypeName System.Collections.Generic.List[psobject]
 $fileShares = New-Object -TypeName System.Collections.Generic.List[psobject]
 $deliveryGroupStatsVDI = New-Object -TypeName System.Collections.Generic.List[psobject]
@@ -594,7 +596,8 @@ ForEach( $ddc in $ddcs )
         }
     }
     
-    $sites += Get-BrokerSite @params | Select Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv,LicenseServerName
+    $sites += Get-BrokerSite @params | Select-Object -Property Name,@{'n'='Delivery Controller';'e'={$ddc}},PeakConcurrentLicenseUsers,TotalUniqueLicenseUsers,LicensingGracePeriodActive,LicensingOutOfBoxGracePeriodActive,LicensingGraceHoursLeft,LicensedSessionsActiv,LicenseServerName
+    $controllers += Get-BrokerController @Params | Select-Object -Property DNSName, ControllerVersion, State, DesktopsRegistered, LastStartTime, LastActivityTime, OSType, OSVersion
 }
 
 if( $PSBoundParameters[ 'outputFile' ] -or ( $recipients -and $recipients.Count -and ! [string]::IsNullOrEmpty( $mailserver ) ) )
@@ -619,6 +622,8 @@ if( $PSBoundParameters[ 'outputFile' ] -or ( $recipients -and $recipients.Count 
     [string]$htmlBody = "<h2>Summary</h2>`n" + $body -split "`n" | ForEach-Object { "<p>$($_ -replace '\t' , '&nbsp;&nbsp;&nbsp;&nbsp;')</p>`n" }
 
     $htmlBody += $sites | ConvertTo-Html -Fragment -PreContent '<h2>Site Information<h2>'| Out-String
+    
+    $htmlBody += $controllers | ConvertTo-Html -Fragment -PreContent '<h2>Delivery Controller Information<h2>'| Out-String
 
     if( [string]::IsNullOrEmpty( $profileName ) ) ## no licence info exposed for Cloud
     {
@@ -845,8 +850,8 @@ if( ! [string]::IsNullOrEmpty( $logfile ) )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU/Cj8V5oq5wx9G4wreKqtHQLY
-# l96gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUUserDt18O2gJu/YbU5GU9ZxX
+# vgigggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -907,11 +912,11 @@ if( ! [string]::IsNullOrEmpty( $logfile ) )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHWgrK+UtlaUH2AHw9jX
-# W2L7wTAzMA0GCSqGSIb3DQEBAQUABIIBAGEUNIrKbybhL+GL5CNnwLBXqUiRrbOK
-# c1/iJjwABHAPw7LwOhJEB+YDHtkb1TNo+AgJ/hs1ZklPNPyLYOYR5d9VONyuS4QY
-# EE3soq7uPHECLI0uRaTUY1h/X+WAddqjo0DuYFGXDZ9SJ7TjgvNYbsifDMtMwB8Z
-# H4fqGPNEUdPmyBikFKHNYJNAwuzYLJhrVxd7SKkHZZqiMJDDY4nNFQFAJrSD/sKE
-# ND+dG++5Zd1JsKgrntfR38fiJsqGbq9JKgwcmJG5gjQQscGB6Oo2KfHNxo2uWQf1
-# hlJ3qKlMlk/RLzgGcLhcSqntXg7bzOGzm2fUatnTR7qCrW3b0XMpxyo=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHxLAxYd1cqlHCYc6AtP
+# ydtJtYywMA0GCSqGSIb3DQEBAQUABIIBACdCTkf9/cNOU5Ol1NIzBmaWGG4RjfTP
+# rciA3FFYZushziTlwwq7TZjl4ntCUjn5g55w9xSbrSOkyV+UbSwKjbn32qNP1JZ3
+# e5mvAanDQ2UpDqAGA5OMto/ABWDl9Gpmg3x/3d2EkNNxQiFm1EHoPL9Fud+4sEBI
+# xa17VFycW69W6q5QkNBO1ZGoi+FPl2PtLxUEeEeZpkSXqH2wHGQPXq4Fp9MmwYDO
+# weJpxDdWUd/6ttIv4vEZQ3YfcENjvaSuI66nR71S5Uw7nWBPoFNV8+l4RHFA1WqQ
+# whZzRBvKxhnWMCuHvzaGsD9Oa77QkHQ4928Qw0hUE1HWgUwTQxO/gNM=
 # SIG # End signature block
