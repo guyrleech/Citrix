@@ -65,6 +65,8 @@
     21/01/21    GL  Added remove from delivery group option
 
     16/06/21    GL  Bug fixes where full domain name passed as part of machine name to DDC actions
+
+    13/09/21    GL  Added menu item to delete DNS entry
 #>
 
 <#
@@ -104,6 +106,10 @@ Pick up the PVS and DDC servers from the registry rather than the command line. 
 .PARAMETER serverSet
 
 Pick up the PVS and DDC servers from the registry sub key specified in this paramter rather than the command line. Must previously have saved them with -save and this server set name
+
+.PARAMETER domain
+
+The FQDN domain to search for the selected PVS devices when deleting DNS records. If not specified, the DNS domain for the user running the script will be used
 
 .PARAMETER save
 
@@ -249,6 +255,7 @@ Param
     [string]$configRegKey = 'HKCU:\software\Guy Leech\PVS Fetcher' ,
     [string]$messageText ,
     [string]$messageCaption ,
+    [string]$domain ,
     [int]$maxRecordCount = 2000 ,
     [int]$jobTimeout = 120 ,
     [int]$timeout = 60 ,
@@ -258,7 +265,7 @@ Param
     [string]$splitVM ,
     [switch]$help ,
     [string[]]$snapins = @( 'Citrix.Broker.Admin.*'  ) ,
-    [string[]]$modules = @( 'ActiveDirectory', "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , 'Guys.Common.Functions.psm1' ) ,
+    [string[]]$modules = @( 'ActiveDirectory', 'DNSServer' , "$env:ProgramFiles\Citrix\Provisioning Services Console\Citrix.PVS.SnapIn.dll" , 'Guys.Common.Functions.psm1' ) ,
     [string]$vmWareModule = 'VMware.VimAutomation.Core'
 )
 
@@ -267,6 +274,8 @@ if( $help )
     Get-Help -Name ( & { $myInvocation.ScriptName } ) -Full
     return
 }
+
+[string]$script:dnsserver = $null
 
 $columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Load Index','Load Indexes','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Account Modified','Domain Membership','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
@@ -390,7 +399,8 @@ $pvsDeviceActionerXAML = @'
                         <MenuItem Header="Delete" Name="DDCDeleteContextMenu" />
                     </MenuItem>
                     <MenuItem Header="AD" Name="ADContextMenu">
-                        <MenuItem Header="Delete" Name="ADDeleteContextMenu" />
+                        <MenuItem Header="Delete Computer" Name="ADDeleteComputerContextMenu" />
+                        <MenuItem Header="Delete DNS Record" Name="ADDeleteDNSContextMenu" />
                     </MenuItem>
                     <MenuItem Header="Windows" Name="WindowsContextMenu">
                         <MenuItem Header="Shutdown" Name="WinShutdownModeOnContextMenu" />
@@ -590,6 +600,7 @@ Function Perform-Action( [string]$action , $form )
         {
             'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName $FQDN | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  ;break }
             'Remove From AD' { Remove-ADComputer -Identity $device.Name -Confirm:$False ;break }
+            'Remove From DNS' { Get-DnsServerResourceRecord -Name $device.Name -ComputerName $script:dnsserver -ZoneName $device.DomainName | Remove-DnsServerResourceRecord -ZoneName $device.DomainName -ComputerName $script:dnsserver -Force ;break }
             'Remove From Delivery Group' { Remove-BrokerMachine -Force -DesktopGroup $device.'Delivery Group' -AdminAddress $device.ddc -MachineName $FQDN ; break  }
             'Remove From DDC' { Remove-BrokerMachine -Force -AdminAddress $device.ddc -MachineName $FQDN ; break  }
             'Remove From PVS' { Set-PvsConnection -Server $device.'PVS Server'; Remove-PvsDevice -DeviceName $device.Name ; break }
@@ -782,15 +793,55 @@ if( $devices -and $devices.Count )
             {
                 $WPFVMwareContextMenu.IsEnabled = $false
             }
-            if( Get-Module ActiveDirectory -ErrorAction SilentlyContinue ) 
+            [int]$ADmenuItems = 0
+            if( Get-Module -Name ActiveDirectory -ErrorAction SilentlyContinue ) 
             {
-                $WPFADDeleteContextMenu.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
+                $WPFADDeleteComputerContextMenu.Add_Click({ Perform-Action -action 'Remove From AD' -form $mainForm })
+                $ADmenuItems++
             }
-            else
+            if( Get-Module -Name DNSServer -ErrorAction SilentlyContinue ) 
+            {
+                ## need to get DNS server so we can remote the delete DNS entry menu item to it
+                [hashtable]$ipaddressesChecked = @{}
+                if( -Not $PSBoundParameters[ 'domain' ] )
+                {
+                    $domain = $env:USERDNSDOMAIN
+                }
+                Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration  -Filter 'IPEnabled = TRUE' | Select-Object -ExpandProperty DNSServerSearchOrder | ForEach-Object `
+                {
+                    $ipaddress = $_
+                    if( [string]::IsNullOrEmpty( $script:dnsserver ) -and -Not $ipaddressesChecked.ContainsKey( $ipaddress ) )
+                    {
+                        Write-Verbose -Message "Checking DNS server IP $ipaddress"
+                        if( $dnsinfo = Get-DnsServer -ComputerName $ipaddress -ErrorAction SilentlyContinue )
+                        {
+                            ForEach( $zone in $dnsinfo.ServerZone )
+                            {
+                                if( $zone.ZoneName -ieq $domain )
+                                {
+                                    $script:dnsserver = $ipaddress
+                                    Write-Verbose -Message "Using $script:dnsserver for DNS"
+                                }
+                            }
+                        }
+                        $ipaddressesChecked.Add( $ipaddress , $ipaddress ) ## so we only check any given IP address once
+                    }
+                }
+                if( [string]::IsNullOrEmpty( $script:dnsserver ) )
+                {
+                    Write-Warning -Message "Unable to find DNS server for domain $domain"
+                }
+                else
+                {
+                    $WPFADDeleteDNSContextMenu.Add_Click({ Perform-Action -action 'Remove From DNS' -form $mainForm })
+                    $ADmenuItems++
+                }
+            }
+            if( $ADmenuItems -eq 0 )
             {
                 $WPFADContextMenu.IsEnabled = $false
             }
-            
+
             $WPFDDCMessageUsersContextMenu.Add_Click({ Perform-Action -action Message -form $mainForm })
             
             $WPFDDCRemoveDeliveryGroupContextMenu.Add_Click({ Perform-Action -action 'Remove From Delivery Group' -form $mainForm })
@@ -833,8 +884,8 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUW2Cqo9USKdmv/JzYUVM6xUL3
-# jKqgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUVDmLDROan2sPbHY8pmJLdLDm
+# k6SgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -895,11 +946,11 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFFYfMu+G8J/nL6O4wDb4
-# jFwod8zYMA0GCSqGSIb3DQEBAQUABIIBAGlPM8Lt5qml+0FxmnQX45NTycPJBz4W
-# muZaFAgfT5eWQZ8/bB3UTCGX3k8u10k/uW12vWJGaHgGnEwUVuSEhuSIa3pXD2Zl
-# JQ0UJQeDtjMDiXBbJXVyMFp/caypLdmy/xMZVr83f2Wj2ZYXUTe1hbG8wbFWkoH+
-# 2H2t1aPx2T+/j8oNza89iNZH/xWrCRGIFBhn92KoNflSCA2EijbjAHJ4iwfpOZgV
-# WbEPWp35EdbLIAcN0tXBLNiRnVsZXsODTlvtDA4IGOmxYULwXjlmDnr1zTxUL3qW
-# spZDwbQzJiurDUK3m0QpmDjnLiinp0h7rmbGmSn4WAvBCEaR9rHi+rQ=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFK7XB3/obgI5RjgcqRIE
+# MpAwFLU0MA0GCSqGSIb3DQEBAQUABIIBAEhUPgETBWhV5YIPAU4l7BifssasTzri
+# 4Ht6RQNGEMJ6ANKmvn5sEoUcPQXYpvzFNIkVIJirQWKOeFcVjrxwqqWZLN+SmzfU
+# xqwDyz21Y31SQZL48eGb7jJpzH7pDmD2S6ZAxFeKyKVvXFsJzX+gfpzbpzbKvoKf
+# srIg7nZ2w7LWOtPXKD57LsOuVQwo2oiyU+5Fu5dCt0rxKGdj9T7/lUGCByP99sO5
+# oG7QEOOZn001EjbphxEVtuyPQuQlDA+6L1S4zmobyOhYHA+6KHYYmNSW21fhqjTU
+# T1MdNYWZia6O0vqY6xKBzQicHJZfUL4TFdHBytPqYQjP+eKb+MiMbOk=
 # SIG # End signature block
