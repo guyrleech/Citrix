@@ -67,6 +67,8 @@
     16/06/21    GL  Bug fixes where full domain name passed as part of machine name to DDC actions
 
     13/09/21    GL  Added menu item to delete DNS entry
+
+    14/09/21    GL  Added "Erase from Existence" menu item to delete from PVS, DDC, AD, DNS and VMware. Use with caution!
 #>
 
 <#
@@ -277,34 +279,34 @@ if( $help )
 
 [string]$script:dnsserver = $null
 
-$columns = [System.Collections.ArrayList]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Load Index','Load Indexes','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
+$columns = [System.Collections.Generic.List[string]]( @( 'Name','DomainName','Description','PVS Server','DDC','SiteName','CollectionName','Machine Catalogue','Delivery Group','Load Index','Load Indexes','Registration State','Maintenance_Mode','User_Sessions','devicemac','active','enabled',
     'Store Name','Disk Version Access','Disk Version Created','AD Account Created','AD Account Modified','Domain Membership','AD Last Logon','AD Description','Disk Name','Booted off vdisk','Booted Disk Version','Vdisk Production Version','Vdisk Latest Version','Latest Version Description','Override Version',
     'Retries','Booted Off','Device IP','Booted off latest','Disk Description','Cache Type','Disk Size (GB)','vDisk Size (GB)','Write Cache Size (MB)' )  )
 
 if( $dns )
 {
-   $null = $columns.Add( 'IPv4 address' )
+   $columns.Add( 'IPv4 address' )
 }
 
 if( $tags )
 {
-   $null = $columns.Add( 'Tags')
+   $columns.Add( 'Tags')
 }
 
 if( ! [string]::IsNullOrEmpty( $ADgroups ) )
 {
-   $null = $columns.Add( 'AD Groups')
+   $columns.Add( 'AD Groups')
 }
 
 if( ! $noRemoting )
 {
-    $null = $columns.Add( 'Boot_Time' )
-    $null = $columns.Add( 'Available Memory (GB)' )
-    $null = $columns.Add( 'Committed Memory %' )
-    $null = $columns.Add( 'Free disk space %' )
+    $columns.Add( 'Boot_Time' )
+    $columns.Add( 'Available Memory (GB)' )
+    $columns.Add( 'Committed Memory %' )
+    $columns.Add( 'Free disk space %' )
     if( $cpuSamples -gt 0 )
     {
-        $null = $columns.Add( 'CPU Usage %' )
+        $columns.Add( 'CPU Usage %' )
     }
 }
 
@@ -406,6 +408,7 @@ $pvsDeviceActionerXAML = @'
                         <MenuItem Header="Shutdown" Name="WinShutdownModeOnContextMenu" />
                         <MenuItem Header="Restart" Name="WinRestartContextMenu" />
                     </MenuItem>
+                    <MenuItem Header="Erase from Existence" Name="EraseFromExistenceContextMenu" />
                 </ContextMenu>
             </ListView.ContextMenu>
             <ListView.View>
@@ -543,20 +546,26 @@ Function Display-MessageBox( $window , $text , $caption , [System.Windows.Messag
     }
 }
 
-Function Perform-Action( [string]$action , $form )
+Function Perform-Action( [string]$action , $form , [bool]$prompt = $true)
 {
-    $_.Handled = $true
+    if( $_ -and $_.PSObject.Properties[ 'Handled' ] )
+    {
+        $_.Handled = $true
+    }
 
     ## Get HWND so we can make app modal dialogues
     $thisWindow = [System.Windows.Interop.WindowInteropHelper]::new($form)
 
-    $answer = Display-MessageBox -text "Are you sure you want to $action these $($WPFlstMachines.SelectedItems.Count) devices ?" -caption 'Confirm' -buttons YesNo -icon Question -window $thisWindow
-
-    if( $answer -ne 'Yes' )
+    if( $prompt )
     {
-        return
+        $answer = Display-MessageBox -text "Are you sure you want to $action these $($WPFlstMachines.SelectedItems.Count) devices ?" -caption 'Confirm' -buttons YesNo -icon Question -window $thisWindow
+
+        if( $answer -ne 'Yes' )
+        {
+            return
+        }
     }
-    
+
     if( $action -eq 'Message' )
     {
         $messageForm = Load-GUI $messageWindowXAML
@@ -580,7 +589,7 @@ Function Perform-Action( [string]$action , $form )
         }
     }
     
-    if( $form )
+    if( $form -and $prompt )
     {
         $oldCursor = $form.Cursor
         $form.Cursor = [Windows.Input.Cursors]::Wait
@@ -596,8 +605,26 @@ Function Perform-Action( [string]$action , $form )
         {
             $FQDN = ( $device.DomainName -split '\.')[0] + '\' +  $device.Name
         }
+        if( $prompt -and $action -imatch 'remove|erase|reboot|shutdown|restart|off' -and $device.user_sessions -ge 1 )
+        {
+           if( ( $answer = Display-MessageBox -text "$FQDN has $($device.user_sessions) user sessions - are you sure you want to $action ?" -caption 'Confirm' -buttons YesNo -icon Question -window $thisWindow ) -ne 'Yes' )
+           {
+                continue
+           }
+        }
         switch -regex ( $action )
         {
+            'Erase from Existence' `
+            {
+                Perform-Action -action 'Remove From Delivery Group' -form $form -prompt $false
+                Perform-Action -action 'Remove From DDC' -form $form -prompt $false
+                Perform-Action -action 'VMware Power Off' -form $form -prompt $false
+                Perform-Action -action 'Remove from Hypervisor' -form $form -prompt $false
+                Perform-Action -action 'Remove From AD' -form $form -prompt $false
+                Perform-Action -action 'Remove From DNS' -form $form -prompt $false
+                Perform-Action -action 'Remove From PVS' -form $form -prompt $false
+                break
+            }
             'Message' { Get-BrokerSession -AdminAddress $device.ddc -MachineName $FQDN | Send-BrokerSessionMessage -AdminAddress $device.ddc -Title $WPFtxtMessageCaption.Text -Text $WPFtxtMessageBody.Text -MessageStyle ($WPFcomboMessageStyle.SelectedItem.Content)  ;break }
             'Remove From AD' { Remove-ADComputer -Identity $device.Name -Confirm:$False ;break }
             'Remove From DNS' { Get-DnsServerResourceRecord -Name $device.Name -ComputerName $script:dnsserver -ZoneName $device.DomainName | Remove-DnsServerResourceRecord -ZoneName $device.DomainName -ComputerName $script:dnsserver -Force ;break }
@@ -673,19 +700,22 @@ Function Perform-Action( [string]$action , $form )
         }
     }
     
-    if( $form )
+    if( $prompt )
     {
-        $form.Cursor = $oldCursor
-    }
+        if( $form )
+        {
+            $form.Cursor = $oldCursor
+        }
 
-    [string]$status =  [System.Windows.MessageBoxImage]::Information
+        [string]$status =  [System.Windows.MessageBoxImage]::Information
 
-    if( $errors )
-    {
-        $status = [System.Windows.MessageBoxImage]::Error
-    }
+        if( $errors )
+        {
+            $status = [System.Windows.MessageBoxImage]::Error
+        }
     
-    Display-MessageBox -window $thisWindow -text "$errors / $($WPFlstMachines.SelectedItems.Count) errors" -caption "Finished $action" -buttons OK -icon $status
+        Display-MessageBox -window $thisWindow -text "$errors / $($WPFlstMachines.SelectedItems.Count) errors" -caption "Finished $action" -buttons OK -icon $status
+    }
 }
 
 if( $noProgress )
@@ -722,11 +752,11 @@ if( $hypervisors -and $hypervisors.Count )
     $null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
     if( Connect-VIserver -Server $hypervisors )
     {
-        $null = $columns.Add( 'CPUs')
-        $null = $columns.Add( 'Memory (GB)')
-        $null = $columns.Add( 'Hard Drives (GB)')
-        $null = $columns.Add( 'NICs')
-        $null = $columns.Add( 'Hypervisor')
+        $columns.Add( 'CPUs')
+        $columns.Add( 'Memory (GB)')
+        $columns.Add( 'Hard Drives (GB)')
+        $columns.Add( 'NICs')
+        $columns.Add( 'Hypervisor')
         ## we pass the modules list to our function so that they can be loaded into the runspaces
         $modules += $vmWareModule
     }
@@ -751,7 +781,7 @@ if( $devices -and $devices.Count )
 {
     if( ! [string]::IsNullOrEmpty( $csv ) )
     {
-        $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
+        $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select-Object -Property $columns | Sort-Object -Property Name | Export-Csv -Path $csv -NoTypeInformation -NoClobber
     }
     if( ! $noGridView )
     {
@@ -770,12 +800,10 @@ if( $devices -and $devices.Count )
             $title += " matching `"$name`""
         }
       
-        [array]$selected = @( $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select $columns | Sort Name | Out-GridView -Title $title @Params )
+        [array]$selected = @( $devices.GetEnumerator() | ForEach-Object { $_.Value } | Select-Object -Property $columns | Sort-Object -Property Name | Out-GridView -Title $title @Params )
         if( $selected -and $selected.Count )
         {
-            $mainForm = Load-GUI $pvsDeviceActionerXAML
-
-            if( ! $mainForm )
+            if( -Not ( $mainForm = Load-GUI $pvsDeviceActionerXAML ) )
             {
                 return
             }
@@ -856,6 +884,7 @@ if( $devices -and $devices.Count )
             $WPFPVSBootContextMenu.Add_Click({ Perform-Action -action 'PVS Boot' -form $mainForm })
             $WPFPVSShutdownContextMenu.Add_Click({ Perform-Action -action 'PVS Power Off' -form $mainForm  })
             $WPFPVSRestartContextMenu.Add_Click({ Perform-Action -action 'PVS Restart' -form $mainForm  })
+            $WPFEraseFromExistenceContextMenu.Add_Click({ Perform-Action -action 'Erase from Existence' -form $mainForm  })
 
             $WPFlstMachines.Items.Clear()
             $WPFlstMachines.ItemsSource = $selected
@@ -884,8 +913,8 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUVDmLDROan2sPbHY8pmJLdLDm
-# k6SgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU81BUw+pErsGyjWnY17lG+3NS
+# Jc2gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -946,11 +975,11 @@ if( ( Get-Variable global:DefaultVIServers -ErrorAction SilentlyContinue ) -and 
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFK7XB3/obgI5RjgcqRIE
-# MpAwFLU0MA0GCSqGSIb3DQEBAQUABIIBAEhUPgETBWhV5YIPAU4l7BifssasTzri
-# 4Ht6RQNGEMJ6ANKmvn5sEoUcPQXYpvzFNIkVIJirQWKOeFcVjrxwqqWZLN+SmzfU
-# xqwDyz21Y31SQZL48eGb7jJpzH7pDmD2S6ZAxFeKyKVvXFsJzX+gfpzbpzbKvoKf
-# srIg7nZ2w7LWOtPXKD57LsOuVQwo2oiyU+5Fu5dCt0rxKGdj9T7/lUGCByP99sO5
-# oG7QEOOZn001EjbphxEVtuyPQuQlDA+6L1S4zmobyOhYHA+6KHYYmNSW21fhqjTU
-# T1MdNYWZia6O0vqY6xKBzQicHJZfUL4TFdHBytPqYQjP+eKb+MiMbOk=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFAWkHKMJIAuRNUFb4UEk
+# xZ04HhsjMA0GCSqGSIb3DQEBAQUABIIBAHxwqTERSzA3ZPtCGDQiSvjOAn63BnIq
+# MXshN2QPzWg8kValXq0AoafSvAhaK6GDxGUSeLELcfSWRDfgcsdouPZ9D5i/1v4V
+# MiDJnRiMJIjs7PWjiDzA6RHG4jkUiVmCd+psxzQFUQjh7YNo7mWOVkFwUZDTZmvY
+# iFNTqXRop+GFVdqNeuFsRRuaUJE6ckeqjTIYa8eh8hlnpNQxQ/TdWlTUvRlfOnlE
+# WYUjIWlX9N0dxsUZXrO2xYB6eSjIastD/KVyOIh1h80Cg2PJ7Lz/soawOoOglqvn
+# 45WciJPCAbIOd0cC4JLXlYdz7xXJXOm5jPTXYD8+iLWHLB7Iu3gYzhs=
 # SIG # End signature block
