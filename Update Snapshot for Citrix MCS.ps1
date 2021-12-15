@@ -70,9 +70,13 @@
 
     Requires CVAD PowerShell cmdlets (installed with Studio or available as separate msi files on the product ISO)
 
-    Use -connfirm:$false to suppress prompting to take actions (use at your own risk)
+    Use -confirm:$false to suppress prompting to take actions (use at your own risk)
 
     https://support.citrix.com/article/CTX129205
+
+    Modification History
+
+    2021/12/05 @guyrleech  Fixed multiple -verbose to Publish-ProvMasterVMImage
 #>
 
 <#
@@ -99,6 +103,7 @@ Param
     [string]$vmName ,
     [string]$hostingUnitName ,
     [string]$ddc ,
+    [string]$profileName ,
     [Parameter(Mandatory=$true,ParameterSetName='ReportOnly')]
     [switch]$reportOnly ,
     [Parameter(Mandatory=$true,ParameterSetName='Reboot')]
@@ -118,7 +123,13 @@ Param
 Add-PSSnapin -Name Citrix.MachineCreation.* , Citrix.Host.*
 
 [hashtable]$citrixParams = @{ 'Verbose' = $false }
-if( $PSBoundParameters[ 'ddc' ] )
+
+if( $PSBoundParameters[ 'profileName' ] )
+{
+    Get-XDAuthentication -ProfileName $profileName -ErrorAction Stop
+    $ddc = 'Cloud'
+}
+elseif( $PSBoundParameters[ 'ddc' ] )
 {
     $citrixParams.Add( 'AdminAddress' , $ddc )
 }
@@ -220,7 +231,7 @@ if( $provScheme = Get-ProvScheme @citrixParams -ProvisioningSchemeUid $machineCa
         elseif( $PSCmdlet.ShouldProcess( "Catalog '$catalog'" , "Publish snapshot '$newSnapshotName'" ) )
         {
             Write-Verbose -Message "$(Get-Date -Format G): starting provisioning snapshot '$(Split-Path -Path $newSnapshotName -Leaf -Verbose:$false)' ..."
-            if( ! ( $publishedResult = Publish-ProvMasterVMImage -ProvisioningSchemeName $provScheme.IdentityPoolName -MasterImageVM $snapshot.FullPath -RunAsynchronously:$async -Verbose:$false @citrixParams ) )
+            if( ! ( $publishedResult = Publish-ProvMasterVMImage -ProvisioningSchemeName $provScheme.IdentityPoolName -MasterImageVM $snapshot.FullPath -RunAsynchronously:$async @citrixParams ) )
             {
                 Throw "Null returned from Publish-ProvMasterVMImage - provisoning most likely failed"
             }
@@ -291,8 +302,8 @@ else
 # SIG # Begin signature block
 # MIIZsAYJKoZIhvcNAQcCoIIZoTCCGZ0CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUL0w1P528ESWZZPWW3CthJK9h
-# qxegghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU1xpt/+OKngVlBtIDWYUJRG8g
+# Cc6gghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
 # AQsFADByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFz
 # c3VyZWQgSUQgVGltZXN0YW1waW5nIENBMB4XDTIxMDEwMTAwMDAwMFoXDTMxMDEw
@@ -408,23 +419,23 @@ else
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQU/U7E7Wp8Hd8cukZrOBPBbwCdS3swDQYJKoZIhvcNAQEBBQAEggEA
-# eEuANXAdnuoJ5AqftLzkiZgbuMedxeOwr0cALAVCVH3vZGIVR8AmCIrsx9EA/TRA
-# qjIOllmEFN6wNH2QNMnSKtsJjuArUAhN+5liqBYPGi/Imn6YUOlmY02Yo7jqT4UP
-# IviVFGTpy23QWHvVE6o2Aq28v+cYmwMwaUHoP0DZdAEH09YA4fJiEY/PCedP0Eo9
-# HVGsMv/8nbYvUFoZZ0vAWecrqXalXcft5Smucm/iPHiJcOJkZV1zuIOfFsgoLYMv
-# V4is2yXNZmPBtiFSro+sgLpEm2eyFOF7c+t54IwLhgKsNAKSULiw3Nrp5U7SoQK5
-# Di2HDIEoeOgvspciFKW6kqGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
+# 9w0BCQQxFgQU5tKtZ5C8fOBcIFZgkKFMNY69JuswDQYJKoZIhvcNAQEBBQAEggEA
+# RgP3eZW7FkMywETZ9TyHJam6+Zjf1Flr/FYlJ/6Vwwb2dSSA7qpKGejSTQbklAqa
+# 3C6q6wfWPkbhGMnaMCCIpi7S94vOYj9C9+07imnDJsVNfKpUjAfg6g56mbPR/eGn
+# VTNYFTgdmxraukh85gO84Ul6FfVcrFN85EP/FYoASl/4QDngqRpfXHRiKPzhTpqa
+# NL2pFKJCfpmewkWyxTgmyadJ+R/yW4spF9qDoBR6Eq7qmhO6f5PqCT2YpSJlPCnV
+# zwdMj4sw8pd/059oRHqU9+p1YyNuGR9FH4s1SClnj1pQysVOhO/dDEWX0EsIirIk
+# cWCKHDmPkWlc1jO1jUsG+KGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
 # hjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL
 # ExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3Vy
 # ZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4UAPDdMA0GCWCGSAFl
 # AwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUx
-# DxcNMjExMDA3MjA1MTE2WjAvBgkqhkiG9w0BCQQxIgQgnllcdK9zc7knH8Le5wB2
-# 88rGgjeLZ/qdkvdOl5PGjZQwDQYJKoZIhvcNAQEBBQAEggEAAjvHGqB8XHMlZ7//
-# PC7p0ECq3Kq4z3LSg7VFiOMB+f20oMIigUxI3HtJZjpyYaMYt2ePnrYM0DQRKd9t
-# j0arrhutLJ8S1zDap/jDNTlKviMlnrq0oC9MRpzVHk4RqXDUkemWe5fQdjryWSHt
-# PpuIu8Vy9CfvLsiM82HGPqqB0/cvF8oY/vNN8LM/zg4kLfdQrnqbSjX3PET1Xkv4
-# I1yIpLeo12KIaMeaK25B/nO+HxDBHtHTZr0PYwxNjW8UehyxPnuS/oR7ewBRHlZo
-# fAcCNXwX1lyCeNyR3lrCJjUjZc8JJOlhvQ70/9oFvw+F4con3MMSZoCl+FxNoaAk
-# 4J2P4g==
+# DxcNMjExMjE1MTU1NjE0WjAvBgkqhkiG9w0BCQQxIgQg+y8X7hTRty3RcSBhsbie
+# LL+zetfV/ucXvXiqx3DrkwkwDQYJKoZIhvcNAQEBBQAEggEAUVaaiAzeVFR6k4Zu
+# yaDLM8R1mTPt/2DbwDFauemhGokt0PFmRNIdUyBzfc65xjj+4RtJyqaWoA4v0DtA
+# MVMaNDK7Jt5yvH14Ln9YQStkwoaUM0A05Kb2fqoxI1+5EGw4tiW7C03F6qN1r/lw
+# +WAXsT24m6Gd85bI+bffHhJkkIT4lb9paiUL0mdwewzuMjwZjVgamEp0sq6EJG3H
+# p7vKP67vLBp6rg2es3K0t2wAG6xefdG3J3755Y1zRjCOJFQQJv7I0iyMANwQw6YV
+# 6COUtoaDOZBnaraA/kHM4tyKR2f5sv42nStZq1YDX7VC0/TSGNm4QXbP2Oa5pUd2
+# L9feMw==
 # SIG # End signature block
