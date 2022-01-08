@@ -77,6 +77,7 @@
     Modification History
 
     2021/12/05 @guyrleech  Fixed multiple -verbose to Publish-ProvMasterVMImage
+    2022/01/08 @guyrleech  Added extra fields to reportonly
 #>
 
 <#
@@ -201,11 +202,17 @@ if( $provScheme = Get-ProvScheme @citrixParams -ProvisioningSchemeUid $machineCa
     if( $reportOnly )
     {
         New-Object -TypeName pscustomobject -ArgumentList @{
+            ## XDHyp:\HostingUnits\Internal Network\GLCTXMCSMAST19.vm\CVAD VDA 2012, VMtools 11.2.1.snapshot\Updated UWM 2020.3 & FSlogix, CVAD 2012.snapshot
+            ##                                      ^^^^^^^^^^^^^^
+            'VM' = $provScheme.MasterImageVM -replace '^XDhyp:\\[^\\]+\\[^\\]+\\([^\\]+)\.vm\\.*$' , '$1'
             'Current Snapshot' = $currentSnapshot
             'Applied Date' = $provScheme.MasterImageVMDate
-            'MemoryGB' = [math]::Round( $provScheme.MemoryMB / 1GB , 2 )
+            'vCPU' = $provScheme.CpuCount
+            'MemoryGB' = [math]::Round( $provScheme.MemoryMB / 1024 , 2 )
             'DiskGB' = $provScheme.DiskSize
             'HostingUnitName' = $provScheme.HostingUnitName
+            'WriteBackCacheDiskSize' = $provScheme.WriteBackCacheDiskSize
+            'WriteBackCacheMemorySize' = $provScheme.WriteBackCacheMemorySize
         }
     }
     elseif( ! $snapshots -or ! $snapshots.Count )
@@ -302,8 +309,8 @@ else
 # SIG # Begin signature block
 # MIIZsAYJKoZIhvcNAQcCoIIZoTCCGZ0CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU1xpt/+OKngVlBtIDWYUJRG8g
-# Cc6gghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU1j4Nj/wEFWI5JCy6qIO5frbn
+# Jv+gghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
 # AQsFADByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFz
 # c3VyZWQgSUQgVGltZXN0YW1waW5nIENBMB4XDTIxMDEwMTAwMDAwMFoXDTMxMDEw
@@ -419,23 +426,23 @@ else
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQU5tKtZ5C8fOBcIFZgkKFMNY69JuswDQYJKoZIhvcNAQEBBQAEggEA
-# RgP3eZW7FkMywETZ9TyHJam6+Zjf1Flr/FYlJ/6Vwwb2dSSA7qpKGejSTQbklAqa
-# 3C6q6wfWPkbhGMnaMCCIpi7S94vOYj9C9+07imnDJsVNfKpUjAfg6g56mbPR/eGn
-# VTNYFTgdmxraukh85gO84Ul6FfVcrFN85EP/FYoASl/4QDngqRpfXHRiKPzhTpqa
-# NL2pFKJCfpmewkWyxTgmyadJ+R/yW4spF9qDoBR6Eq7qmhO6f5PqCT2YpSJlPCnV
-# zwdMj4sw8pd/059oRHqU9+p1YyNuGR9FH4s1SClnj1pQysVOhO/dDEWX0EsIirIk
-# cWCKHDmPkWlc1jO1jUsG+KGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
+# 9w0BCQQxFgQU5ZXw7eYZG/RYZvBUoLM1CrAMHKMwDQYJKoZIhvcNAQEBBQAEggEA
+# o7tCC8LSJXak2eVke0Q9KbF3nVaqazeVlZzyKxGf06Gq3yGAw6ABMV3+Y7MhAy4V
+# JHyf6P4MaRYNjNcStYrnlayBGNeXk8lwIY3R/+KS9jvbVW4pxUn2FZUw0l3PsMxQ
+# qicTkfPL3Bch2m+spJxmNMO1D6Rc56Ocs6UhFolFaGZmrSCxWCBIt+ZcyPo29X+4
+# DKpS6iUCMFi5qpeoLo0fRoP1ZBrv/k2YvXpJ0lejF2w8qxRpwe5GOVzlzl7+3J01
+# 1nZMhJCe41G0Hy8XtnMSu0SIy2OKFYPThz3iJK9wkL/J9ijHj9JETN43yy3eqfBY
+# iiR9HwyMHqNNrD44UUJmDqGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
 # hjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL
 # ExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3Vy
 # ZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4UAPDdMA0GCWCGSAFl
 # AwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUx
-# DxcNMjExMjE1MTU1NjE0WjAvBgkqhkiG9w0BCQQxIgQg+y8X7hTRty3RcSBhsbie
-# LL+zetfV/ucXvXiqx3DrkwkwDQYJKoZIhvcNAQEBBQAEggEAUVaaiAzeVFR6k4Zu
-# yaDLM8R1mTPt/2DbwDFauemhGokt0PFmRNIdUyBzfc65xjj+4RtJyqaWoA4v0DtA
-# MVMaNDK7Jt5yvH14Ln9YQStkwoaUM0A05Kb2fqoxI1+5EGw4tiW7C03F6qN1r/lw
-# +WAXsT24m6Gd85bI+bffHhJkkIT4lb9paiUL0mdwewzuMjwZjVgamEp0sq6EJG3H
-# p7vKP67vLBp6rg2es3K0t2wAG6xefdG3J3755Y1zRjCOJFQQJv7I0iyMANwQw6YV
-# 6COUtoaDOZBnaraA/kHM4tyKR2f5sv42nStZq1YDX7VC0/TSGNm4QXbP2Oa5pUd2
-# L9feMw==
+# DxcNMjIwMTA4MTYxMzM4WjAvBgkqhkiG9w0BCQQxIgQgJNZT9BwdwzlGc5hzeQj8
+# 8F7qg4/HSBDQrtrgCxFKdIgwDQYJKoZIhvcNAQEBBQAEggEAunloKUHWmaGM1TVI
+# SBQg5Mj0BeiPojGCjgm93CRlIRo/Ak4XAzYEvqK1U2xVVc6pW2xkGWrzHM3xptuc
+# CC0rStfBJhXohfLYwVTzhWR17FQVcvjBqeWtwaFAZL1cImniF///RSIXmwNgk7wV
+# kegT8HwBEVfwFaEWX+uFGOTN+7mEWROgNhISXLxTv2pA7qP3Tcbjzu6JmIYdSCI1
+# bcqYeOcioqAq7jMk8Sn883BhpMxuM8dVPRvluS68X0h7M3Xqb6SgHyCSPOZZGOGq
+# JapbWrUd1/o/2GRdqX8Xy6DMaAze6o7cWUXaN9ZgNI12vfS+q52OTH4TP2d2nToI
+# JA6b8A==
 # SIG # End signature block
