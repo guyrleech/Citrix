@@ -1,0 +1,128 @@
+NS version: NetScaler NS13.0: Build 83.27.nc, Date: Sep 27 2021, 07:06:36   (64-bit)
+usage: nsconmsg [-U]
+d <operation>   : display performance data
+                  current       - display the current performance data
+                  past          - display the performance data from begining
+                  stats         - display current statistics counters
+                  finalstats    - display final newnslog statistics counters
+                  last          - display last newnslog statistics counters
+                  memstats      - display current memory statistics
+                  statswt0      - display current statistics counters,
+                                  excluding counters with 0 value
+                  lastwt0       - display last newnslog statistics counters,
+                                  excluding counters with 0 value
+                  finalstatswt0 - display final newnslog statistics counters,
+                                  excluding counters with 0 value (same as '-d lastwt0')
+                  devcr         - display device creation/removal information
+                  devlink       - display device link information
+                  devname       - display all device names
+                  symname       - display all symbol names & decoding scheme
+                  devsymrel     - display all device and symbol relationship
+                  event         - display events
+                  nicdata       - display NIC debug data
+                  eventwait     - display events (real time wake)
+                  consmsg       - display console message
+                  oldconmsg     - display netscaler old console message
+                                  (use -s options for different debug level)
+                  setime        - display the start and end time of data file
+                  auditedcmd    - display audited command
+                  logfromnfw    - display seleced log messages from new logging framework
+                  copy          - alias to copyr
+                  copyr         - copy data from one file to another file with filter and sample rate change
+                  old2new       - convert old performance data to new format
+                  new2old       - convert new performance data to old format
+                  v20tov21      - convert v2.0 performance data to v2.1 format
+                  v21tov20      - convert v2.1 performance data to v2.0 format
+                  v20tov22      - convert v2.0 performance data to v2.2 format
+                  v20toGRP      - convert v2.0 performance data to v3.0(Group Record) format
+                  maxvalue      - display highest value and time
+                  minvalue      - display lowest value and time
+                  maxrate       - display highest rate value and time
+                  minrate       - display lowest rate value and time
+                  distrconmsg   - display distribution of counter
+                                  (use -s options for different debug level)
+f <symname>     : display only these symbols with full pattern match
+                  symname- is string, can have wild card '*' and '?'
+F <symname>     : do not display these symbols with full pattern match
+                  symname- is string, can have wild card '*' and '?'
+g <symname>     : display only these symbols with partial pattern match
+                  symname- is string, can have wild card '?'
+G <symname>     : do not display these symbols with partial pattern match
+                  symname- is string, can have wild card '?'
+h               : display help information
+i <devname>     : display only these devices with full pattern match
+                  devname- is string, can have wild card '*' and '?'
+I <devname>     : do not display these devices with full pattern match
+                  devname- is string, can have wild card '*' and '?'
+j <devname>     : display only these devices with partial pattern match
+                  devname- is string, can have wild card '?'
+J <devname>     : do not display these devices with partial pattern match
+                  devname- is string, can have wild card '?'
+O : overwrite output file (used before the k option)
+k <file-name>   : keep performance information in a file(STDOUT if name 'pipe'
+K <file-name>   : Display performance information from kept data file (STDIN if name 'pipe'
+B <file-name>   : Base file for delta compression
+s <name=value>  : set different debug parameters
+                  verbose       - set/reset verbose mode
+                  nsdebug_pe    - setup nsdebug_pe value for debugmsg
+                  nsdebug_pe_mask - setup nsdebug_pe_mask value for debugmsg
+                  nsppeid - PPE from which to collect the data
+                  nspartid - Partition ID to display the data
+                  ConDebug      - setup ConDebug value for debugmsg
+                  ConLb         - setup ConLb value for debugmsg
+                  ConMon        - setup ConMon value for debugmsg
+                  ConMEM        - setup ConMEM value for debugging memory details
+                  ConCSW        - setup ConCSW value for debugmsg
+                  ConSSL        - setup ConSSL value for debugmsg
+                  ConCMP        - setup ConCMP value for debugmsg
+                                  1 : for new compression method
+                                  2 : for old compression method
+                  ConIC         - setup ConIC value for debugmsg
+                                  1 : display basic cache stats
+                  disptime      - display time information if needed
+                  allstats      - display events and auditedcmd also
+                                                only applicable for current, past, oldconmsg
+                  csv           - display current/past in csv format
+                  deflate       - 1 : deflate compression (no crc, length)
+                  compressbuf   - setup compression input buffer size
+                  compressdebug - setup compress debug flags
+                  compressdepth - setup compression depth size for match
+                  compressmode  - setup compress mode 'static', 'dynamic',
+                                  'beststatic','bestdynamic','block','full',
+                                  'bestcompression'
+                  compressfreq  - display compression frequencies
+                  totalcount    - display if total count is above or equal
+                  logsize       - size of log file in BYTES
+                  deltacount    - display if delta count is above or equal
+                  ratecount     - display if rate count is above or equal
+                  totalcountlow - display if total count is below or equal
+                  deltacountlow - display if delta count is below or equal
+                  ratecountlow  - display if rate count is below or equal
+                  syslog         - set to redirect events into syslog messages
+                  syslogfacility - set syslog facility to 0 to 7 (LOCAL0 to LOCAL7)
+                  syslogtime     - Log time information(actual time event happend)into in syslog
+                  time          - set operation start time as ddmmmyyyy:hh:mm
+                                  e.g. 07DEC2001:10:17
+                  pedist        - display stats from multiple PEs simultaneously.
+                                  It works for '-d stats', '-d current', '-d past, '-d minrate', '-d maxrate', '-d minvalue', -d 'maxvalue'
+                                  e.g. nsconmsg -s pedist=1 -g netio_tot_called -d current
+        timeintervalms  - Set display time interval for operation in milliseconds
+        grouprecord     - Set/reset group record conversion option
+S <operation>   : save the performance data
+                  current       - save starting from current data
+                  past          - save starting from begining
+                  compress      - save compressed data (option -K & -k needed)
+
+                  dcompress     - save decompressed data (option -K & -k needed)
+                  dmux          - work on mux block which includes (option -K & -k needed)
+                                  -K to define input file, -k output file
+                  delta         - delta compress (files: -B base, -K update, -k delta)
+                  dedelta       - dedelta (uncompress) (files: -B base, -K delta, -k update
+                  js_b2a        - convert input to JS 7-8 ASCII (-K input, -k output
+                  js_a2b        - convert JS 7-8 ASCII to binary (-K input, -k output
+t <time>        : define time interval for operation (default 7 seconds)
+T <time>        : define time for operation (default 0 or infinite)
+U <system[:user[:passwd]]> do remote system access. The parameters are :
+                  system - remote system name/IP-address
+                  user   - user name for access (default nsroot)
+                  passwd - password for user (default no password)
