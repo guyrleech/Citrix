@@ -12,6 +12,7 @@
     @guyrleech  07/06/22  Added -profilename for Citrix Cloud
     @guyrleech  10/10/22  Added progress indicator
     @guyrleech  15/06/23  Added output formats, exclusion of ids, output file wttih %variables%
+    @guyrleech  20/06/23  Fixed issues when running against XD 7.6
 #>
 
 <#
@@ -209,7 +210,7 @@ Function Invoke-ODataTransform
 
     Process
     {
-        if( $records -is [array] )
+        if( $records -is [array] -or $records -is [Xml.XmlElement] )
         {
             if( -Not $propertyNames )
             {
@@ -295,22 +296,22 @@ Function Get-DateRanges
     {
         if( $from )
         {
-            "()?`$filter=$field ge $(Get-Date -date $from -format s)Z"
+            "()?`$filter=$field ge $($from.ToString( 's' ))Z"
         }
         if( $to )
         {
-            "and $field le $(Get-Date -date $to -format s)Z"
+            "and $field le $($to.ToString('s'))Z"
         }
     }
     else
     {
         if( $from )
         {
-            "()?`$filter=$field ge datetime'$(Get-Date -date $from -format s)'"
+            "()?`$filter=$field ge datetime'$($from.ToString( 's' ))'"
         }
         if( $to )
         {
-            "and $field le datetime'$(Get-Date -date $to -format s)'"
+            "and $field le datetime'$($to.ToString( 's' ))'"
         }
     }
 }
@@ -743,7 +744,7 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     }
     else
     {
-        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
+        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $version)
     }
 
     Write-Verbose "URL : $($params.Uri)"
@@ -832,7 +833,7 @@ if( [string]::IsNullOrEmpty( $query ) )
 
 if( $services )
 {
-    if( $services.PSObject.Properties[ 'service' ] )
+    if( $services.PSObject.Properties[ 'service' ] -or ( $services | Get-Member -MemberType Property -Name service -ErrorAction SilentlyContinue ))
     {
         $services.service.workspace.collection | Select-Object -Property 'title' | Sort-Object -Property 'title'
     }
@@ -920,7 +921,7 @@ elseif( $data -and $data.Count )
         $finalOutput | Set-Content -Path $outputFile -Encoding $outputEncoding
         if( $? )
         {
-            Write-Output -InputObject "Wrote $($finalOutput.Length) bytes to `"$outputFile`""
+            Write-Verbose -Message "Wrote $($finalOutput.Length) items to `"$outputFile`""
         }
     }
 }
@@ -932,8 +933,8 @@ else
 # SIG # Begin signature block
 # MIIjcAYJKoZIhvcNAQcCoIIjYTCCI10CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUhh0ubkWFTWKy3LE1VXk8SbM+
-# nAmggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUx0AmkkDAz8jBPUla0J5GYh4m
+# yvuggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -1096,28 +1097,28 @@ else
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUMIP5hpPLkg7BATT1Z7bHCC8GjRcwDQYJKoZIhvcNAQEBBQAEggEA
-# UEqe8cFU3m3DG5xvhN8lSR+evKAw7+4/g4a3VwLmtjJWtkYuLJ+uWh8/UHU3ulDF
-# B/KoJq5BPlTs0e3FujSfu9lA7lRJMXOlGKWLifiENx/x5/BK2QefgzUWBavjOYFy
-# 4PIR1dAgmGOF9znbRYnSmyJIaaQPWR37p9HZn/D0rY4qcFrCQHbRG9lQU9pBZvYt
-# YN1pGGpi5uRetXqztt/me91CU1wUdVDf12l4iSE1pU1NsnFy+UVKJ+I2omGFlsRR
-# lMKsrA13pibJkXrPLka5Xww1I5sYcOhNgChbhzyHDOLe97Tfmz3od+5pbsxi9Lg/
-# f/WD7AdIsygfaLt3yF24AqGCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
+# 9w0BCQQxFgQUZz1zn3w0/njUXVQOeX3Oz7dzOR0wDQYJKoZIhvcNAQEBBQAEggEA
+# qFy30ov03XVp8lgPu9IT2/ZAoGk5adebeRGifEmyHFge39W4ApGcSGn/s+/88sYN
+# R8bDl6KeXXXlV9+5SaeUA9LecwWLVDIJ3KT73Xpy3G4on2+GNkFPcVtq+1cNszem
+# QmX/bY0rx21YRgveL+ynLpsCOaiFJ9AXNBwVbiNZvcDU1Us2mlPZpUw+Ysuw5T6D
+# CVYsAbs4yfgN5DR63sHBaOwCEAdeKo9GylMfQZ8mgmjhyiDjWxzdg9jk1VZFHoBe
+# KLXDdCsWRizdawah/DFMaw70idejBtP8AnGAjCReDLyKQSIFpturB9uSRgirpfzQ
+# ax0NMWVWGPuedAYxiUxuQ6GCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
 # MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UE
 # AxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBp
 # bmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG
-# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMzA2MTUyMTEzNDla
-# MC8GCSqGSIb3DQEJBDEiBCBR900iKELoWERCHFZS4Zq8JpIbRkTlo3jlavupSZTy
-# BDANBgkqhkiG9w0BAQEFAASCAgACzJjhamYm6vJqsc34EGBLcC3G6PIic/yYvJgC
-# /oh1Nd4xMaqqHUinrVxDGqVexn2K7xNBlf9eOLPF2m5kFAz/yJBUYR8pFkwl+r05
-# 3DhJkN7v56cnKVET7Xd1j8/xTejc22ikm2juKa38/0EewWJTSRFeaWqWisxLBncS
-# SmQ1yboAWkp01tsOlgwdf1OrCE5RQP4CFNIzBpVUrSK0pTMeBcfIfJxQ1Q216E5f
-# yfgLYUZBw09llYjy5QLClNt/sonk/Pqb5+xXSkoh4PsVlOudKIASkvnoi7gVBK3+
-# FVtW9R5J6ZqLk8cjh99Ws6lZAXwFISCl3gt+kNy2VykBC2jcLB+Td2/W9OZJJuY4
-# nm0TNPEaUSDbrYVUFVrNLgozryvf4v4qG2L1MGEdSzrn4yd/PNv5sOc73G/RwnED
-# IyU45zJvwJMUjkuvZrt8lJTCZ8OCaAyVaXeyv8mm2/XxmZGApQtLdZaqWJOeDD61
-# Nazpm2jyRPun1oa6Zf5zPMV4CKIVFqxZVLa/oNOSJCoQL0PbqvzzDGOx2BF3dnN5
-# 8MpIL3MCDJ3VLH23VzUBKw8KJl1q9mCGcrgCV3gTbVdQum8W7Zqi281iFF5zsVSs
-# pV/eW1y1RGyrmIr4RrI9Ni8tJeodj2vohJcG4ay8cLMGSCXtWGVHuRQfZAxhXJqT
-# +T2ydA==
+# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMzA2MjAyMDA5MjFa
+# MC8GCSqGSIb3DQEJBDEiBCB4XQB82VVy5ndg1ODynVF+9F9l0HQy7cSL76N33my8
+# 7TANBgkqhkiG9w0BAQEFAASCAgA1KsO3eNX+s1FgTarVbPBp2TBh1cjFsOQPmWnz
+# 0l2lvmKFOBBuh/9TqVsV5btfMy5HYh/UiPHkGUmsVvqlgTUdyTXh5lZc4Uwkp1uo
+# V+xaq6JiUmnn6R1wRawW2w8cyMtGdel2OrqNwzcDq4BW+vi9lkt0Gt0mAJozYUE9
+# JySLdmFuXVFnGTr1CwVYuuH2ZjQQ+ROqLPPGbDmgLVPWNYd9geihGbX/gbu875Uy
+# f6svo3y7H6v8OKyfhNeTFIvqTXa9ZT1xIcOUUP+GfHwsiHrRqetotNa+g5MTp3b5
+# I//Ci+B/E/TwBmJ8ZD50RU57GtolJN/UsJcxWuwPXOjjf2kIPArUb31YukThtyXt
+# rQMAMXlw33zJ9W2pqBH4+QpfGcgXdKbPUkUGRtdlbeQj/1iI71JRS6MHIjik27DJ
+# Z3TAquZUA+Uxj6IhHaFu8h8X3x0bCBaEGvedk9w4jeFwGcg7Sa7BlNn6LPaHEUBV
+# P+sP+KqRrgHxQc/7vhzqYabuPLpfS1UIXf7NS7NeE/zmcqeBKVARyB1WWyIjRz+p
+# k5yThJIPtyIl21tKYgZkJtrARSC33NexWMphsXWYD427bDbSR/BvWCSLWTtd5SH3
+# 3sIF/G02FQLacX7jxG7LK7vNTE1LnojYISyML4CCpvFh4w8sSTEPQaSlbf9MaEA+
+# tkBIxQ==
 # SIG # End signature block
