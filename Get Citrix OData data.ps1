@@ -15,6 +15,8 @@
     @guyrleech  20/06/23  Fixed issues when running against XD 7.6
     @guyrleech  08/08/23  Fixed issue where didn't run with PS 4.0, add date filtering when cross referencing Sessions and Connections
     @guyrleech  16/04/24  Added Cloud auth via client id & secret arguments so no requirement for Citrix Remote PS SDK unless using auth profiles
+    @guyrleech  17/04/24  Added count query to first request and -maximumItems to limit items returned
+    @guyrleech  22/04/24  Fix for count query when no query string passed
 #>
 
 <#
@@ -71,6 +73,10 @@ Use with -join to resolve ids to entity names
 .PARAMETER query
 
 The item to query. If not specified, all services/queries available will be returned
+
+.PARAMETER maximumItems
+
+The maximum number of items to return although as results are returned in pages, it may be slightly more than this number
 
 .PARAMETER join
 
@@ -169,6 +175,8 @@ Param
     [datetime]$from ,
     [datetime]$to ,
     [string]$last ,
+    [int]$maximumItems = 0 ,
+    [string]$proxyServer = $null ,
     [ValidateSet('csv','json','xml','object','txt')]
     [string]$format = 'csv' ,
     [ValidateSet( 'String' , 'Unicode' , 'Byte' , 'BigEndianUnicode' , 'UTF8' , 'UTF7' , 'UTF32' , 'Ascii' , 'Default' , 'Oem' , 'BigEndianUTF32' )]
@@ -193,7 +201,6 @@ Param
     [switch]$AllowUnencryptedAuthentication
 )
 
-$script:proxyServer = $null
 
 if( $PSBoundParameters[ 'from' ] -and $PSBoundParameters[ 'to' ] -and $from -gt $to )
 {
@@ -227,14 +234,18 @@ Function Get-BearerToken {
     $response = $null
     try
     {
+        $startRequestTime = [datetime]::Now
+        Write-Verbose -Message "$($startRequestTime.ToString('G')): sending auth request"
         $response = Invoke-RestMethod -Uri 'https://api-us.cloud.com/cctrustoauth2/root/tokens/clients' -Method POST -Body $body
+        $endRequestTime = [datetime]::Now
     }
     catch
     {
-        Write-Verbose -Message "Get-BearerToken: exception $_"
-        if( $_.Exception.Message -imatch 'Unable to connect to the remote server' -or  $_.Exception.Message -imatch 'The operation has timed out' -and -not [string]::IsNullOrEmpty( $script:proxyServer )  )
+        $endRequestTime = [datetime]::Now
+        Write-Verbose -Message "$($startRequestTime.ToString('G')): get-BearerToken: exception $_"
+        if( $_.Exception.Message -imatch 'Unable to connect to the remote server' -or  $_.Exception.Message -imatch 'The operation has timed out' -and -not [string]::IsNullOrEmpty( $proxyServer )  )
         {
-            $response = Invoke-RestMethod -Uri 'https://api-us.cloud.com/cctrustoauth2/root/tokens/clients' -Method POST -Body $body -Proxy $script:proxyServer -ProxyUseDefaultCredentials
+            $response = Invoke-RestMethod -Uri 'https://api-us.cloud.com/cctrustoauth2/root/tokens/clients' -Method POST -Body $body -Proxy $proxyServer -ProxyUseDefaultCredentials
         }
         else
         {
@@ -244,7 +255,8 @@ Function Get-BearerToken {
 
     if( $null -ne $response )
     {
-        $bearerToken = "CwsAuth Bearer=$($response | Select-Object -expandproperty access_token)" 
+        $bearerToken = "CwsAuth Bearer=$($response | Select-Object -expandproperty access_token)"
+        Write-Verbose -Message "$($startRequestTime.ToString('G')): auth seems ok"
     }
     ## else will have output error
     $bearerToken ## return    
@@ -824,15 +836,20 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
         $version = $highestVersion--
     }
     
+    [string]$countQuery = $null
+    if( -Not [string]::IsNullOrEmpty( $query ) )
+    {
+        $countQuery = '&$count=true'
+    }
     if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     {
         ##$params[ 'Uri' ] = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $customerid , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
-        $params[ 'Uri' ] = "$baseCloudURL/$query" + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
+        $params[ 'Uri' ] = "$baseCloudURL/$query" + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion) + $countQuery
         $cloud = $true
     }
     else
     {
-        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $version)
+        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $version) + $countQuery
     }
 
     Write-Verbose "URL : $($params.Uri)"
@@ -842,6 +859,8 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
         [int]$results = 0
         [int]$requests = 0
         [string]$lasturi = $params.uri
+        [bool]$firstQuery = $true
+        [int]$countOfItems = 0
 
         do
         {
@@ -851,6 +870,15 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
 
             if( $null -ne $resultsPage )
             {
+                if( $firstQuery )
+                {
+                    if( $resultsPage.psobject.Properties[ '@odata.count' ] )
+                    {
+                        $countOfItems = $resultsPage.'@odata.count'
+                        Write-Verbose -Message "There are $countOfItems $query items"
+                    }
+                    $firstQuery = $false
+                }
                 $results += ( $resultsPage | Select-Object -ExpandProperty Value | Measure-Object).Count
                 if( [string]::IsNullOrEmpty( $query ) )
                 {
@@ -863,11 +891,11 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
                 ## https://support.citrix.com/article/CTX312284
                 if( $resultsPage.PSObject.Properties['@odata.nextLink' ] -and -not [string]::IsNullOrEmpty( $resultsPage.'@odata.nextLink' ) )
                 {
-                    $params.uri = $resultsPage.'@odata.nextLink'
+                    $params.uri = $resultsPage.'@odata.nextLink' -replace [regex]::Escape( $countQuery )
                     ## prevent infinite loop if something goes wrong
                     if( $params.uri -ne $lasturi )
                     {
-                        Write-Verbose -Message "More data available, fetching from $($params.uri)"
+                        Write-Verbose -Message "More data available ($($countOfItems - $results)), fetching from $($params.uri)"
                         $lasturi = $params.uri
                     }
                     else
@@ -881,7 +909,7 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
                     break
                 }
             }
-        } while( $resultsPage )
+        } while( $resultsPage -and ( $maximumItems -le 0 -or $results -lt $maximumItems ))
         Write-Verbose -Message "Got $results query results in total across $requests requests"
         
         $fatalException = $null
