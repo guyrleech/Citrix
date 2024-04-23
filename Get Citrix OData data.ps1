@@ -17,6 +17,7 @@
     @guyrleech  16/04/24  Added Cloud auth via client id & secret arguments so no requirement for Citrix Remote PS SDK unless using auth profiles
     @guyrleech  17/04/24  Added count query to first request and -maximumItems to limit items returned
     @guyrleech  22/04/24  Fix for count query when no query string passed
+    @guyrleech  22/04/24  Fix for the fix for count query when no query string passed
 #>
 
 <#
@@ -205,6 +206,11 @@ Param
 if( $PSBoundParameters[ 'from' ] -and $PSBoundParameters[ 'to' ] -and $from -gt $to )
 {
     Throw "Start date $(Get-Date -Date $from -Format G) is after end date $(Get-Date -Date $to -Format G)"
+}
+
+if( [string]::IsNullOrEmpty( $query ) -and ( $PSBoundParameters[ 'from' ] -or $PSBoundParameters[ 'to' ] ) )
+{
+    Throw "Cannot use -from and/or -to when there is no specific -query specified"
 }
 
 ## map tables to the date stamp we will filter on
@@ -837,19 +843,27 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     }
     
     [string]$countQuery = $null
+    [string]$dateFilter = Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion
     if( -Not [string]::IsNullOrEmpty( $query ) )
     {
-        $countQuery = '&$count=true'
+        if( -Not [string]::IsNullOrEmpty( $dateFilter ) )
+        {
+            $countQuery = '&$count=true'
+        }
+        else
+        {
+            $countQuery = '/?$count=true'
+        }
     }
     if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     {
         ##$params[ 'Uri' ] = ( "{0}://{1}.xendesktop.net/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $customerid , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion)
-        $params[ 'Uri' ] = "$baseCloudURL/$query" + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion) + $countQuery
+        $params[ 'Uri' ] = "$baseCloudURL/$query$dateFilter$countQuery"
         $cloud = $true
     }
     else
     {
-        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}" -f $protocol , $ddc , $version , $query ) + (Get-DateRanges -query $query -from $from -to $to -oDataVersion $version) + $countQuery
+        $params[ 'Uri' ] = ( "{0}://{1}/Citrix/Monitor/OData/v{2}/Data/{3}{4}{5}" -f $protocol , $ddc , $version , $query , $dateFilter , $countQuery )
     }
 
     Write-Verbose "URL : $($params.Uri)"
