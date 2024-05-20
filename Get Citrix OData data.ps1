@@ -17,7 +17,9 @@
     @guyrleech  16/04/24  Added Cloud auth via client id & secret arguments so no requirement for Citrix Remote PS SDK unless using auth profiles
     @guyrleech  17/04/24  Added count query to first request and -maximumItems to limit items returned
     @guyrleech  22/04/24  Fix for count query when no query string passed
-    @guyrleech  22/04/24  Fix for the fix for count query when no query string passed
+    @guyrleech  23/04/24  Fix for the fix for count query when no query string passed
+    @guyrleech  24/04/24  Fix for v3 OData requests and below where date range not correct
+    @guyrleech  29/05/24  Don't remove $count from uri when more data as causes error
 #>
 
 <#
@@ -359,6 +361,8 @@ Function Get-DateRanges
         [int]$oDataVersion
     )
     
+    Write-Verbose -Message "Get-DateRanges: from $from to $to selective $selective OData version $oDataVersion"
+
     $field = $dateFields[ ($query -replace 's$' , '') ]
     if( -Not $field )
     {
@@ -402,7 +406,8 @@ Function Resolve-CrossReferences
         $exclude ,
         [switch]$cloud ,
         $from , 
-        $to
+        $to ,
+        [int]$odataVersion
     )
     
     Process
@@ -843,8 +848,8 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
     }
     
     [string]$countQuery = $null
-    [string]$dateFilter = Get-DateRanges -query $query -from $from -to $to -oDataVersion $oDataVersion
-    if( -Not [string]::IsNullOrEmpty( $query ) )
+    [string]$dateFilter = Get-DateRanges -query $query -from $from -to $to -oDataVersion $version
+    if( -Not [string]::IsNullOrEmpty( $query ) -and $version -ge 4 )
     {
         if( -Not [string]::IsNullOrEmpty( $dateFilter ) )
         {
@@ -905,7 +910,7 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
                 ## https://support.citrix.com/article/CTX312284
                 if( $resultsPage.PSObject.Properties['@odata.nextLink' ] -and -not [string]::IsNullOrEmpty( $resultsPage.'@odata.nextLink' ) )
                 {
-                    $params.uri = $resultsPage.'@odata.nextLink' -replace [regex]::Escape( $countQuery )
+                    $params.uri = $resultsPage.'@odata.nextLink' ## -replace [regex]::Escape( $countQuery )
                     ## prevent infinite loop if something goes wrong
                     if( $params.uri -ne $lasturi )
                     {
@@ -946,6 +951,7 @@ if( $PsCmdlet.ParameterSetName -eq 'cloud' )
         }
         else
         {
+            Write-Verbose -Message "Exception : $_"
             $version = --$highestVersion
         }
     }
@@ -981,7 +987,7 @@ elseif( $data -and $data.Count )
         [hashtable]$tables = @{}
 
         ## now figure out what other tables we need in order to satisfy these ids (not interested in id on it's own)
-        $data[0].PSObject.Properties | Resolve-CrossReferences -cloud:$cloud -Include $includePropertyRegex -Exclude $excludePropertyRegex -from $from -to $to
+        $data[0].PSObject.Properties | Resolve-CrossReferences -cloud:$cloud -Include $includePropertyRegex -Exclude $excludePropertyRegex -from $from -to $to -oDataVersion $version
 
         [int]$originalPropertyCount = $data[0].PSObject.Properties.GetEnumerator() | Measure-Object | Select-Object -ExpandProperty Count
         [int]$finalPropertyCount = -1
